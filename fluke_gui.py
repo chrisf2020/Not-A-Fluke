@@ -12,7 +12,6 @@ from scapy.contrib.cdp import (
     CDPMsgDeviceID,
     CDPMsgPortID,
     CDPMsgNativeVLAN,
-    CDPMsgApplianceID,
     CDPAddrRecordIPv4
 )
 from scapy.contrib.lldp import (
@@ -37,7 +36,7 @@ class FlukeApp:
         self.root.configure(bg="#121212")
         self.root.bind("<Escape>", lambda e: self.root.destroy())
 
-        # Style configuration for loading progress bar
+        # Progress bar visual styling
         self.style = ttk.Style()
         self.style.theme_use('default')
         self.style.configure(
@@ -51,7 +50,7 @@ class FlukeApp:
         self.container = tk.Frame(root, bg="#121212")
         self.container.pack(expand=True, fill=tk.BOTH)
 
-        # Build UI views
+        # Build UI Views
         self.build_scanner_ui()
         self.build_results_ui()
         self.show_scanner_ui()
@@ -99,7 +98,7 @@ class FlukeApp:
         )
         self.timer_label.pack(pady=10)
 
-        # Loading container for speed testing
+        # Loading container for bandwidth testing
         self.loading_frame = tk.Frame(self.scanner_frame, bg="#121212")
         self.loading_text = tk.Label(
             self.loading_frame, text="", font=("Helvetica", 14),
@@ -189,7 +188,7 @@ class FlukeApp:
         )
         footer.pack(fill=tk.X)
 
-    # --- UI MANAGERS ---
+    # --- UI STATE MANAGERS ---
 
     def show_scanner_ui(self):
         self.stop_loading_animation()
@@ -315,11 +314,10 @@ class FlukeApp:
             device = packet.getlayer(CDPMsgDeviceID)
             port = packet.getlayer(CDPMsgPortID)
             vlan = packet.getlayer(CDPMsgNativeVLAN)
-            voice = packet.getlayer(CDPMsgApplianceID)
             ip_layer = packet.getlayer(CDPAddrRecordIPv4)
 
-            dev_val = device.val.decode(errors="replace") if isinstance(device.val, bytes) else device.val
-            port_val = port.iface.decode(errors="replace") if isinstance(port.iface, bytes) else port.iface
+            dev_val = device.val.decode(errors="replace") if (device and isinstance(device.val, bytes)) else (device.val if device else "Unknown")
+            port_val = port.iface.decode(errors="replace") if (port and isinstance(port.iface, bytes)) else (port.iface if port else "Unknown")
             
             self.scan_results["switch_name"] = str(dev_val)
             self.scan_results["switch_port"] = str(port_val)
@@ -328,11 +326,22 @@ class FlukeApp:
             if ip_layer and hasattr(ip_layer, 'addr'):
                 self.scan_results["switch_ip"] = str(ip_layer.addr)
 
-            if vlan:
+            if vlan and hasattr(vlan, 'vlan'):
                 self.scan_results["switch_vlan"] = str(vlan.vlan)
 
-            if voice:
-                self.scan_results["switch_voice"] = str(voice.vlan)
+            # Safely check for CDP Appliance/Voice VLAN TLV (Type 0x000e)
+            current = packet.getlayer("CDP")
+            while current:
+                if getattr(current, "type", None) == 0x000e:
+                    val = getattr(current, "val", b"")
+                    if isinstance(val, bytes) and len(val) >= 3:
+                        vlan_id = int.from_bytes(val[1:3], byteorder="big")
+                        self.scan_results["switch_voice"] = str(vlan_id)
+                        break
+                    elif hasattr(current, "vlan"):
+                        self.scan_results["switch_voice"] = str(current.vlan)
+                        break
+                current = current.payload
 
             return True
 
@@ -381,7 +390,7 @@ class FlukeApp:
             if not self.is_cable_connected():
                 continue
 
-            # 3. DNS MONITORING (3s)
+            # 3. DNS MONITORING (3s active query)
             self.root.after(0, self.update_scanner, "TESTING NETWORK...", "#FFFF00", "Mode: DNS Sniffing", "00:03")
             self.sniffing = True
             timer_thread = threading.Thread(target=self.countdown_timer, args=(3,))
