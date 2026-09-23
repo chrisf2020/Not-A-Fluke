@@ -5,10 +5,15 @@ import time
 import socket
 import threading
 import tkinter as tk
+from tkinter import ttk
 import speedtest
 from scapy.all import sniff, load_contrib
-from scapy.contrib.cdp import CDPMsgDeviceID, CDPMsgPortID
-from scapy.contrib.lldp import LLDPDUChassisID, LLDPDUPortID
+from scapy.contrib.cdp import CDPMsgDeviceID, CDPMsgPortID, CDPMsgNativeVLAN
+from scapy.contrib.lldp import (
+    LLDPDUChassisID,
+    LLDPDUPortID,
+    LLDPDUGenericOrganisationSpecific
+)
 from scapy.layers.dns import DNS, DNSQR
 from scapy.layers.inet import IP, UDP, TCP
 
@@ -26,6 +31,14 @@ class FlukeApp:
         self.root.configure(bg="#121212")
         self.root.bind("<Escape>", lambda e: self.root.destroy())
 
+        # Style configuration for ttk progress bar
+        self.style = ttk.Style()
+        self.style.theme_use('default')
+        self.style.configure("Custom.Horizontal.TProgressbar", 
+                             troughcolor='#1A1A1A', 
+                             background='#00E5FF', 
+                             thickness=14)
+
         # Main Container
         self.container = tk.Frame(root, bg="#121212")
         self.container.pack(expand=True, fill=tk.BOTH)
@@ -35,10 +48,11 @@ class FlukeApp:
         self.build_results_ui()
         self.show_scanner_ui()
 
-        # Shared Data Storage
+        # Shared Diagnostic Storage
         self.scan_results = {
             "switch_name": "--",
             "switch_port": "--",
+            "switch_vlan": "--",
             "switch_proto": "--",
             "speed_down": "--",
             "speed_up": "--",
@@ -67,13 +81,26 @@ class FlukeApp:
             self.scanner_frame, text="Ready", font=("Helvetica", 16, "italic"),
             bg="#121212", fg="#888888"
         )
-        self.mode_label.pack(pady=30)
+        self.mode_label.pack(pady=20)
 
         self.timer_label = tk.Label(
-            self.scanner_frame, text="--:--", font=("Helvetica", 60, "bold"),
+            self.scanner_frame, text="--:--", font=("Helvetica", 54, "bold"),
             bg="#121212", fg="#FFFFFF"
         )
-        self.timer_label.pack(pady=20)
+        self.timer_label.pack(pady=10)
+
+        # Speed test loading container
+        self.loading_frame = tk.Frame(self.scanner_frame, bg="#121212")
+        self.loading_text = tk.Label(
+            self.loading_frame, text="", font=("Helvetica", 14),
+            bg="#121212", fg="#00E5FF"
+        )
+        self.loading_text.pack(pady=5)
+        self.progress_bar = ttk.Progressbar(
+            self.loading_frame, style="Custom.Horizontal.TProgressbar",
+            mode="indeterminate", length=400
+        )
+        self.progress_bar.pack(pady=10)
 
         self.footer = tk.Label(
             self.scanner_frame, text="Press 'Esc' to exit", font=("Helvetica", 10),
@@ -86,61 +113,81 @@ class FlukeApp:
         
         header = tk.Label(
             self.results_frame, text="DIAGNOSTIC COMPLETE", font=("Helvetica", 20, "bold"),
-            bg="#00E5FF", fg="#000000", pady=10
+            bg="#00E5FF", fg="#000000", pady=8
         )
         header.pack(fill=tk.X)
 
-        # Switch Section
+        # Switch Topology Section (with VLAN)
         switch_frame = tk.Frame(self.results_frame, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
-        switch_frame.pack(fill=tk.X, padx=20, pady=10)
-        tk.Label(switch_frame, text="Switch Topology", font=("Helvetica", 16, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=5)
+        switch_frame.pack(fill=tk.X, padx=20, pady=8)
+        tk.Label(switch_frame, text="Switch Topology", font=("Helvetica", 15, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=3)
         
-        self.res_switch_lbl = tk.Label(switch_frame, text="Name: --", font=("Helvetica", 14), bg="#1A1A1A", fg="#76FF03")
+        self.res_switch_lbl = tk.Label(switch_frame, text="Name: --", font=("Helvetica", 13), bg="#1A1A1A", fg="#76FF03")
         self.res_switch_lbl.pack()
-        self.res_port_lbl = tk.Label(switch_frame, text="Port: --", font=("Helvetica", 14), bg="#1A1A1A", fg="#76FF03")
-        self.res_port_lbl.pack(pady=5)
+        self.res_port_lbl = tk.Label(switch_frame, text="Port: --", font=("Helvetica", 13), bg="#1A1A1A", fg="#76FF03")
+        self.res_port_lbl.pack()
+        self.res_vlan_lbl = tk.Label(switch_frame, text="VLAN ID: --", font=("Helvetica", 13), bg="#1A1A1A", fg="#76FF03")
+        self.res_vlan_lbl.pack(pady=3)
 
         # SpeedTest Section
         speed_frame = tk.Frame(self.results_frame, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
-        speed_frame.pack(fill=tk.X, padx=20, pady=10)
-        tk.Label(speed_frame, text="Bandwidth", font=("Helvetica", 16, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=5)
+        speed_frame.pack(fill=tk.X, padx=20, pady=8)
+        tk.Label(speed_frame, text="Bandwidth", font=("Helvetica", 15, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=3)
         
-        self.res_speed_lbl = tk.Label(speed_frame, text="Down: -- Mbps | Up: -- Mbps | Ping: -- ms", font=("Helvetica", 14), bg="#1A1A1A", fg="#FFD700")
-        self.res_speed_lbl.pack(pady=5)
+        self.res_speed_lbl = tk.Label(speed_frame, text="Down: -- Mbps | Up: -- Mbps | Ping: -- ms", font=("Helvetica", 13), bg="#1A1A1A", fg="#FFD700")
+        self.res_speed_lbl.pack(pady=4)
 
         # DNS Section
         dns_frame = tk.Frame(self.results_frame, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
-        dns_frame.pack(fill=tk.X, padx=20, pady=10)
-        tk.Label(dns_frame, text="DNS Activity", font=("Helvetica", 16, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=5)
+        dns_frame.pack(fill=tk.X, padx=20, pady=8)
+        tk.Label(dns_frame, text="DNS Activity", font=("Helvetica", 15, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=3)
         
-        self.res_dns_lbl = tk.Label(dns_frame, text="Queries captured: 0 | Last: --", font=("Helvetica", 14), bg="#1A1A1A", fg="#FF00FF")
-        self.res_dns_lbl.pack(pady=5)
+        self.res_dns_lbl = tk.Label(dns_frame, text="Queries captured: 0 | Last: --", font=("Helvetica", 13), bg="#1A1A1A", fg="#FF00FF")
+        self.res_dns_lbl.pack(pady=4)
 
         self.res_footer = tk.Label(
             self.results_frame, text="Unplug cable to reset scanner | Press 'Esc' to exit", font=("Helvetica", 10),
             bg="#121212", fg="#888888", pady=5
         )
-        self.res_footer.pack(side=tk.BOTTOM, pady=10)
+        self.res_footer.pack(side=tk.BOTTOM, pady=6)
 
-    # --- STATE MANAGERS ---
+    # --- UI STATE MANAGERS ---
 
     def show_scanner_ui(self):
+        self.stop_loading_animation()
         self.results_frame.pack_forget()
         self.scanner_frame.pack(expand=True, fill=tk.BOTH)
 
     def show_results_ui(self):
+        self.stop_loading_animation()
         sw_text = f"Name/ID: {self.scan_results['switch_name']} ({self.scan_results['switch_proto']})"
         pt_text = f"Port: {self.scan_results['switch_port']}"
+        vl_text = f"VLAN: {self.scan_results['switch_vlan']}"
         sp_text = f"Down: {self.scan_results['speed_down']} | Up: {self.scan_results['speed_up']} | Ping: {self.scan_results['speed_ping']}"
         dn_text = f"Queries: {self.scan_results['dns_queries']} | Domain: {self.scan_results['dns_last_domain']}"
 
         self.res_switch_lbl.config(text=sw_text)
         self.res_port_lbl.config(text=pt_text)
+        self.res_vlan_lbl.config(text=vl_text)
         self.res_speed_lbl.config(text=sp_text)
         self.res_dns_lbl.config(text=dn_text)
 
         self.scanner_frame.pack_forget()
         self.results_frame.pack(expand=True, fill=tk.BOTH)
+
+    def start_loading_animation(self, message):
+        self.timer_label.pack_forget()
+        self.loading_text.config(text=message)
+        self.loading_frame.pack(pady=15)
+        self.progress_bar.start(10)
+
+    def set_loading_message(self, message):
+        self.loading_text.config(text=message)
+
+    def stop_loading_animation(self):
+        self.progress_bar.stop()
+        self.loading_frame.pack_forget()
+        self.timer_label.pack(pady=10)
 
     def update_scanner(self, status, status_color, mode, timer_text):
         self.status_label.config(text=status, fg=status_color)
@@ -151,6 +198,7 @@ class FlukeApp:
         self.scan_results = {
             "switch_name": "Not Found",
             "switch_port": "Not Found",
+            "switch_vlan": "Untagged / Default",
             "switch_proto": "--",
             "speed_down": "Failed",
             "speed_up": "Failed",
@@ -180,6 +228,7 @@ class FlukeApp:
     # --- PACKET HANDLERS ---
 
     def parse_cdp_lldp(self, packet):
+        # 1. Check for LLDP
         if packet.haslayer("LLDPDU"):
             chassis = packet.getlayer(LLDPDUChassisID)
             port = packet.getlayer(LLDPDUPortID)
@@ -191,17 +240,36 @@ class FlukeApp:
             self.scan_results["switch_name"] = str(cid)
             self.scan_results["switch_port"] = str(pid)
             self.scan_results["switch_proto"] = "LLDP"
+
+            # Parse 802.1 VLAN TLV (OUI: 00-80-c2, Subtype: 1)
+            layer = packet.getlayer(LLDPDUGenericOrganisationSpecific)
+            while layer:
+                if layer.org_code == 0x0080c2 and layer.subtype == 1:
+                    raw_vlan = layer.data
+                    if len(raw_vlan) >= 2:
+                        vlan_id = int.from_bytes(raw_vlan[:2], byteorder="big")
+                        self.scan_results["switch_vlan"] = str(vlan_id)
+                        break
+                layer = layer.payload.getlayer(LLDPDUGenericOrganisationSpecific)
+
             return True
 
+        # 2. Check for CDP
         elif packet.haslayer("CDP"):
             device = packet.getlayer(CDPMsgDeviceID)
             port = packet.getlayer(CDPMsgPortID)
+            vlan = packet.getlayer(CDPMsgNativeVLAN)
+
             dev_val = device.val.decode(errors="replace") if isinstance(device.val, bytes) else device.val
             port_val = port.iface.decode(errors="replace") if isinstance(port.iface, bytes) else port.iface
             
             self.scan_results["switch_name"] = str(dev_val)
             self.scan_results["switch_port"] = str(port_val)
             self.scan_results["switch_proto"] = "CDP"
+
+            if vlan:
+                self.scan_results["switch_vlan"] = str(vlan.vlan)
+
             return True
         return False
 
@@ -254,7 +322,6 @@ class FlukeApp:
             timer_thread = threading.Thread(target=self.countdown_timer, args=(3,))
             timer_thread.start()
 
-            # Generate query in background so Scapy intercepts it on eth0
             threading.Thread(target=lambda: socket.gethostbyname("google.com"), daemon=True).start()
 
             sniff(
@@ -270,13 +337,22 @@ class FlukeApp:
             if not self.is_cable_connected():
                 continue
 
-            # 4. BANDWIDTH TEST
-            self.root.after(0, self.update_scanner, "TESTING NETWORK...", "#FFFF00", "Mode: Bandwidth Speed Test", "--:--")
+            # 4. BANDWIDTH TEST: Speedtest with Loading Animation
+            self.root.after(0, self.update_scanner, "TESTING NETWORK...", "#FFFF00", "Mode: Bandwidth Speed Test", "")
+            self.root.after(0, self.start_loading_animation, "Connecting to closest server...")
+
             try:
                 st = speedtest.Speedtest()
                 st.get_best_server()
-                self.scan_results["speed_down"] = f"{st.download() / 1_000_000:.1f} Mbps"
-                self.scan_results["speed_up"] = f"{st.upload() / 1_000_000:.1f} Mbps"
+                
+                self.root.after(0, self.set_loading_message, "Testing Download Speed...")
+                down_bps = st.download()
+                
+                self.root.after(0, self.set_loading_message, "Testing Upload Speed...")
+                up_bps = st.upload()
+
+                self.scan_results["speed_down"] = f"{down_bps / 1_000_000:.1f} Mbps"
+                self.scan_results["speed_up"] = f"{up_bps / 1_000_000:.1f} Mbps"
                 self.scan_results["speed_ping"] = f"{st.results.ping:.0f} ms"
             except Exception:
                 pass
