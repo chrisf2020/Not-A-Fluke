@@ -1,32 +1,23 @@
 #!/usr/bin/env python3
+
+#Libraries
 import os
 import sys
 import time
 import socket
 import threading
+import subprocess
 import tkinter as tk
 from tkinter import ttk
 import speedtest
-from scapy.all import sniff, load_contrib
-from scapy.contrib.cdp import (
-    CDPMsgDeviceID,
-    CDPMsgPortID,
-    CDPMsgNativeVLAN,
-    CDPAddrRecordIPv4
-)
-from scapy.contrib.lldp import (
-    LLDPDUChassisID,
-    LLDPDUPortID,
-    LLDPDUGenericOrganisationSpecific,
-    LLDPDUManagementAddress
-)
+from scapy.all import sniff
 from scapy.layers.dns import DNS, DNSQR
-
-load_contrib("cdp")
-load_contrib("lldp")
 
 INTERFACE = "eth0"
 CARRIER_PATH = f"/sys/class/net/{INTERFACE}/carrier"
+# Wait a bit past Cisco's slower ~60s CDP interval so a fresh cable always gets one full cycle.
+SWITCH_DISCOVERY_TIMEOUT = 65
+
 
 class FlukeApp:
     def __init__(self, root):
@@ -34,15 +25,15 @@ class FlukeApp:
         self.root.title("PiScout Pro")
         self.root.attributes("-fullscreen", True)
         self.root.configure(bg="#121212")
-        self.root.bind("<Escape>", lambda e: self.root.destroy())
+        self.root.bind("<Escape>", self.close_window)
 
         # Progress bar visual styling
         self.style = ttk.Style()
         self.style.theme_use('default')
         self.style.configure(
-            "Custom.Horizontal.TProgressbar", 
-            troughcolor='#1A1A1A', 
-            background='#00E5FF', 
+            "Custom.Horizontal.TProgressbar",
+            troughcolor='#1A1A1A',
+            background='#00E5FF',
             thickness=14
         )
 
@@ -79,7 +70,7 @@ class FlukeApp:
 
     def build_scanner_ui(self):
         self.scanner_frame = tk.Frame(self.container, bg="#121212")
-        
+
         self.status_label = tk.Label(
             self.scanner_frame, text="WAITING FOR CABLE...", font=("Helvetica", 20, "bold"),
             bg="#2B2B2B", fg="#FFA500", pady=15
@@ -133,17 +124,17 @@ class FlukeApp:
         self.scroll_content = tk.Frame(self.scroll_canvas, bg="#121212")
         self.canvas_window = self.scroll_canvas.create_window((0, 0), window=self.scroll_content, anchor="nw")
 
-        self.scroll_content.bind("<Configure>", lambda e: self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all")))
-        self.scroll_canvas.bind("<Configure>", lambda e: self.scroll_canvas.itemconfig(self.canvas_window, width=e.width))
+        self.scroll_content.bind("<Configure>", self.update_scroll_region)
+        self.scroll_canvas.bind("<Configure>", self.resize_scroll_content)
 
         # Keyboard and Mousewheel bindings for scrolling
-        self.root.bind("<Up>", lambda e: self.scroll_canvas.yview_scroll(-1, "units"))
-        self.root.bind("<Down>", lambda e: self.scroll_canvas.yview_scroll(1, "units"))
-        self.root.bind("<Prior>", lambda e: self.scroll_canvas.yview_scroll(-5, "units"))  # Page Up
-        self.root.bind("<Next>", lambda e: self.scroll_canvas.yview_scroll(5, "units"))   # Page Down
-        self.root.bind("<MouseWheel>", lambda e: self.scroll_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
-        self.root.bind("<Button-4>", lambda e: self.scroll_canvas.yview_scroll(-1, "units"))
-        self.root.bind("<Button-5>", lambda e: self.scroll_canvas.yview_scroll(1, "units"))
+        self.root.bind("<Up>", self.scroll_up)
+        self.root.bind("<Down>", self.scroll_down)
+        self.root.bind("<Prior>", self.scroll_page_up)     # Page Up
+        self.root.bind("<Next>", self.scroll_page_down)    # Page Down
+        self.root.bind("<MouseWheel>", self.scroll_with_mouse_wheel)
+        self.root.bind("<Button-4>", self.scroll_up)
+        self.root.bind("<Button-5>", self.scroll_down)
 
         # --- Switch Topology Card ---
         topo_frame = tk.Frame(self.scroll_content, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
@@ -187,6 +178,38 @@ class FlukeApp:
             font=("Helvetica", 10), bg="#121212", fg="#888888", pady=10
         )
         footer.pack(fill=tk.X)
+
+    # --- EVENT HANDLERS ---
+    # Tkinter calls these automatically when the matching key/event happens. The "event"
+    # argument is required by Tkinter even when we don't need to look at it ourselves.
+
+    def close_window(self, event):
+        self.root.destroy()
+
+    def update_scroll_region(self, event):
+        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+
+    def resize_scroll_content(self, event):
+        self.scroll_canvas.itemconfig(self.canvas_window, width=event.width)
+
+    def scroll_up(self, event):
+        self.scroll_canvas.yview_scroll(-1, "units")
+
+    def scroll_down(self, event):
+        self.scroll_canvas.yview_scroll(1, "units")
+
+    def scroll_page_up(self, event):
+        self.scroll_canvas.yview_scroll(-5, "units")
+
+    def scroll_page_down(self, event):
+        self.scroll_canvas.yview_scroll(5, "units")
+
+    def scroll_with_mouse_wheel(self, event):
+        # event.delta is positive when scrolling up and negative when scrolling down.
+        if event.delta > 0:
+            self.scroll_canvas.yview_scroll(-1, "units")
+        else:
+            self.scroll_canvas.yview_scroll(1, "units")
 
     # --- UI STATE MANAGERS ---
 
@@ -258,94 +281,110 @@ class FlukeApp:
             return False
 
     def countdown_timer(self, seconds):
-        for i in range(seconds, -1, -1):
+        seconds_left = seconds
+        while seconds_left >= 0:
             if not self.sniffing:
                 break
-            self.root.after(0, self.timer_label.config, {'text': f"00:{i:02d}"})
+            self.root.after(0, self.timer_label.config, {'text': f"00:{seconds_left:02d}"})
             time.sleep(1)
+            seconds_left = seconds_left - 1
+
+    # --- SWITCH TOPOLOGY (CDP/LLDP via lldpd) ---
+
+    def query_lldpd(self):
+        # Ask the lldpd service (installed/started by install.sh) what it's heard on this port.
+        # "-f keyvalue" prints one line per fact, like:  lldp.eth0.chassis.name=SWITCH-01
+        try:
+            result = subprocess.run(
+                ["lldpctl", "-f", "keyvalue", INTERFACE],
+                capture_output=True, text=True, timeout=5
+            )
+            return result.stdout
+        except FileNotFoundError:
+            return ""
+        except subprocess.TimeoutExpired:
+            return ""
+
+    def get_lldp_value(self, kv_text, field_name):
+        # kv_text is many lines of "lldp.eth0.<field_name>=<value>". Find the one line that
+        # starts with our field name and return the value after the "=". If there's no such
+        # line, lldpd hasn't heard that fact, so return an empty string.
+        prefix = "lldp." + INTERFACE + "." + field_name + "="
+        for line in kv_text.splitlines():
+            if line.startswith(prefix):
+                return line[len(prefix):]
+        return ""
+
+    def apply_switch_topology(self, kv_text):
+        if kv_text.strip() == "":
+            return False
+
+        switch_name = self.get_lldp_value(kv_text, "chassis.name")
+        if switch_name == "":
+            switch_name = "Unknown"
+        self.scan_results["switch_name"] = switch_name
+
+        # Different switches put the port name in different fields; try each in turn.
+        port = self.get_lldp_value(kv_text, "port.ifname")
+        if port == "":
+            port = self.get_lldp_value(kv_text, "port.descr")
+        if port == "":
+            port = self.get_lldp_value(kv_text, "port.local")
+        if port == "":
+            port = "Unknown"
+        self.scan_results["switch_port"] = port
+
+        vlan = self.get_lldp_value(kv_text, "vlan.vlan-id")
+        if vlan == "":
+            vlan = "None / Untagged"
+        self.scan_results["switch_vlan"] = vlan
+
+        switch_ip = self.get_lldp_value(kv_text, "chassis.mgmt-ip")
+        if switch_ip == "":
+            switch_ip = "Not Advertised"
+        self.scan_results["switch_ip"] = switch_ip
+
+        protocol = self.get_lldp_value(kv_text, "via")
+        if protocol == "":
+            protocol = "--"
+        self.scan_results["switch_proto"] = protocol
+
+        # Voice VLAN (LLDP-MED / CDP appliance TLV): any line mentioning "voice" with a VLAN id.
+        voice = "None"
+        for line in kv_text.splitlines():
+            if "voice" in line.lower() and "vid=" in line:
+                voice = line.split("=", 1)[1]
+                break
+        self.scan_results["switch_voice"] = voice
+
+        return True
+
+    def discover_switch_topology(self):
+        # Poll lldpd once a second instead of sniffing packets ourselves — lldpd already runs
+        # continuously in the background, so this usually returns data on the very first check.
+        seconds_left = SWITCH_DISCOVERY_TIMEOUT
+        while seconds_left >= 0:
+            if not self.is_cable_connected():
+                return False
+
+            minutes = seconds_left // 60
+            seconds = seconds_left % 60
+            self.root.after(0, self.timer_label.config, {'text': f"{minutes:02d}:{seconds:02d}"})
+
+            kv_text = self.query_lldpd()
+            if self.apply_switch_topology(kv_text):
+                return True
+
+            time.sleep(1)
+            seconds_left = seconds_left - 1
+
+        return False
 
     # --- PACKET HANDLERS ---
 
-    def parse_cdp_lldp(self, packet):
-        # 1. LLDP Frame Parsing
-        if packet.haslayer("LLDPDU"):
-            chassis = packet.getlayer(LLDPDUChassisID)
-            port = packet.getlayer(LLDPDUPortID)
-            cid = getattr(chassis, 'macaddr', None) or getattr(chassis, 'id', 'Unknown')
-            pid = getattr(port, 'portid', 'Unknown')
-            if isinstance(pid, bytes):
-                pid = pid.decode(errors="replace")
-            
-            self.scan_results["switch_name"] = str(cid)
-            self.scan_results["switch_port"] = str(pid)
-            self.scan_results["switch_proto"] = "LLDP"
-
-            # Parse Management IP Address TLV
-            mgmt = packet.getlayer(LLDPDUManagementAddress)
-            if mgmt and hasattr(mgmt, 'management_address'):
-                addr_bytes = mgmt.management_address
-                if len(addr_bytes) == 4:
-                    self.scan_results["switch_ip"] = socket.inet_ntoa(addr_bytes)
-                else:
-                    self.scan_results["switch_ip"] = str(addr_bytes)
-
-            # Parse IEEE 802.1 / TIA Org-Specific TLVs for Data/Voice VLAN
-            layer = packet.getlayer(LLDPDUGenericOrganisationSpecific)
-            while layer:
-                # 802.1 Port VLAN ID (OUI: 00-80-c2, Subtype: 1)
-                if layer.org_code == 0x0080c2 and layer.subtype == 1:
-                    if len(layer.data) >= 2:
-                        vlan_id = int.from_bytes(layer.data[:2], byteorder="big")
-                        self.scan_results["switch_vlan"] = str(vlan_id)
-
-                # LLDP-MED Network Policy for Voice (OUI: 00-12-bb, Subtype: 2)
-                elif layer.org_code == 0x0012bb and layer.subtype == 2:
-                    if len(layer.data) >= 4:
-                        policy = int.from_bytes(layer.data[:4], byteorder="big")
-                        vlan_id = (policy >> 9) & 0x0FFF
-                        self.scan_results["switch_voice"] = str(vlan_id)
-
-                layer = layer.payload.getlayer(LLDPDUGenericOrganisationSpecific)
-
-            return True
-
-        # 2. CDP Frame Parsing
-        elif packet.haslayer("CDP"):
-            device = packet.getlayer(CDPMsgDeviceID)
-            port = packet.getlayer(CDPMsgPortID)
-            vlan = packet.getlayer(CDPMsgNativeVLAN)
-            ip_layer = packet.getlayer(CDPAddrRecordIPv4)
-
-            dev_val = device.val.decode(errors="replace") if (device and isinstance(device.val, bytes)) else (device.val if device else "Unknown")
-            port_val = port.iface.decode(errors="replace") if (port and isinstance(port.iface, bytes)) else (port.iface if port else "Unknown")
-            
-            self.scan_results["switch_name"] = str(dev_val)
-            self.scan_results["switch_port"] = str(port_val)
-            self.scan_results["switch_proto"] = "CDP"
-
-            if ip_layer and hasattr(ip_layer, 'addr'):
-                self.scan_results["switch_ip"] = str(ip_layer.addr)
-
-            if vlan and hasattr(vlan, 'vlan'):
-                self.scan_results["switch_vlan"] = str(vlan.vlan)
-
-            # Safely check for CDP Appliance/Voice VLAN TLV (Type 0x000e)
-            current = packet.getlayer("CDP")
-            while current:
-                if getattr(current, "type", None) == 0x000e:
-                    val = getattr(current, "val", b"")
-                    if isinstance(val, bytes) and len(val) >= 3:
-                        vlan_id = int.from_bytes(val[1:3], byteorder="big")
-                        self.scan_results["switch_voice"] = str(vlan_id)
-                        break
-                    elif hasattr(current, "vlan"):
-                        self.scan_results["switch_voice"] = str(current.vlan)
-                        break
-                current = current.payload
-
-            return True
-
-        return False
+    def lookup_google(self):
+        # Just triggers a real DNS lookup so there's something for parse_dns_packet to catch.
+        socket.gethostbyname("google.com")
 
     def parse_dns_packet(self, packet):
         if packet.haslayer(DNS) and packet.haslayer(DNSQR):
@@ -371,22 +410,14 @@ class FlukeApp:
 
             self.reset_data()
 
-            # 2. SWITCH TOPOLOGY DISCOVERY (30s)
-            self.root.after(0, self.update_scanner, "TESTING NETWORK...", "#FFFF00", "Mode: Switch Discovery (CDP/LLDP)", "00:30")
-            self.sniffing = True
-            timer_thread = threading.Thread(target=self.countdown_timer, args=(30,))
-            timer_thread.start()
-
-            sniff(
-                iface=INTERFACE,
-                filter="ether proto 0x88cc or ether dst 01:00:0c:cc:cc:cc",
-                stop_filter=self.parse_cdp_lldp,
-                timeout=30,
-                store=0
+            # 2. SWITCH TOPOLOGY DISCOVERY (up to SWITCH_DISCOVERY_TIMEOUT seconds)
+            start_minutes = SWITCH_DISCOVERY_TIMEOUT // 60
+            start_seconds = SWITCH_DISCOVERY_TIMEOUT % 60
+            self.root.after(
+                0, self.update_scanner, "TESTING NETWORK...", "#FFFF00",
+                "Mode: Switch Discovery (CDP/LLDP)", f"{start_minutes:02d}:{start_seconds:02d}"
             )
-            
-            self.sniffing = False
-            timer_thread.join()
+            self.discover_switch_topology()
             if not self.is_cable_connected():
                 continue
 
@@ -396,7 +427,7 @@ class FlukeApp:
             timer_thread = threading.Thread(target=self.countdown_timer, args=(3,))
             timer_thread.start()
 
-            threading.Thread(target=lambda: socket.gethostbyname("google.com"), daemon=True).start()
+            threading.Thread(target=self.lookup_google, daemon=True).start()
 
             sniff(
                 iface=INTERFACE,
@@ -405,7 +436,7 @@ class FlukeApp:
                 timeout=3,
                 store=0
             )
-            
+
             self.sniffing = False
             timer_thread.join()
             if not self.is_cable_connected():
@@ -418,10 +449,10 @@ class FlukeApp:
             try:
                 st = speedtest.Speedtest()
                 st.get_best_server()
-                
+
                 self.root.after(0, self.set_loading_message, "Testing Download Speed...")
                 down_bps = st.download()
-                
+
                 self.root.after(0, self.set_loading_message, "Testing Upload Speed...")
                 up_bps = st.upload()
 
@@ -436,6 +467,7 @@ class FlukeApp:
 
             while self.is_cable_connected() and self.running:
                 time.sleep(1)
+
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
