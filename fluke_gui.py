@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-#Libraries
+# Libraries
 import os
 import sys
 import time
@@ -54,6 +54,9 @@ class FlukeApp:
             "switch_vlan": "--",
             "switch_voice": "--",
             "switch_proto": "--",
+            "poe_available": "None Detected",
+            "poe_class": "--",
+            "poe_power": "--",
             "speed_down": "--",
             "speed_up": "--",
             "speed_ping": "--",
@@ -130,15 +133,15 @@ class FlukeApp:
         # Keyboard and Mousewheel bindings for scrolling
         self.root.bind("<Up>", self.scroll_up)
         self.root.bind("<Down>", self.scroll_down)
-        self.root.bind("<Prior>", self.scroll_page_up)     # Page Up
-        self.root.bind("<Next>", self.scroll_page_down)    # Page Down
+        self.root.bind("<Prior>", self.scroll_page_up)
+        self.root.bind("<Next>", self.scroll_page_down)
         self.root.bind("<MouseWheel>", self.scroll_with_mouse_wheel)
         self.root.bind("<Button-4>", self.scroll_up)
         self.root.bind("<Button-5>", self.scroll_down)
 
         # --- Switch Topology Card ---
         topo_frame = tk.Frame(self.scroll_content, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
-        topo_frame.pack(fill=tk.X, padx=15, pady=8)
+        topo_frame.pack(fill=tk.X, padx=15, pady=6)
         tk.Label(topo_frame, text="Switch Topology", font=("Helvetica", 14, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=4)
 
         self.lbl_sw = tk.Label(topo_frame, text="SW: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
@@ -156,9 +159,20 @@ class FlukeApp:
         self.lbl_voice = tk.Label(topo_frame, text="VOICE: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
         self.lbl_voice.pack(fill=tk.X, padx=15, pady=3)
 
+        # --- PoE Card ---
+        poe_frame = tk.Frame(self.scroll_content, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
+        poe_frame.pack(fill=tk.X, padx=15, pady=6)
+        tk.Label(poe_frame, text="Power over Ethernet (PoE)", font=("Helvetica", 14, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=4)
+
+        self.res_poe_status = tk.Label(poe_frame, text="Status: --", font=("Helvetica", 12, "bold"), bg="#1A1A1A", fg="#FFA500")
+        self.res_poe_status.pack(pady=1)
+
+        self.res_poe_details = tk.Label(poe_frame, text="Allocated: -- | Standard: --", font=("Courier", 12), bg="#1A1A1A", fg="#76FF03")
+        self.res_poe_details.pack(pady=3)
+
         # --- Bandwidth Card ---
         speed_frame = tk.Frame(self.scroll_content, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
-        speed_frame.pack(fill=tk.X, padx=15, pady=8)
+        speed_frame.pack(fill=tk.X, padx=15, pady=6)
         tk.Label(speed_frame, text="Bandwidth", font=("Helvetica", 14, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=4)
 
         self.res_speed_lbl = tk.Label(speed_frame, text="Down: -- Mbps | Up: -- Mbps | Ping: -- ms", font=("Helvetica", 12), bg="#1A1A1A", fg="#FFD700")
@@ -166,7 +180,7 @@ class FlukeApp:
 
         # --- DNS Activity Card ---
         dns_frame = tk.Frame(self.scroll_content, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
-        dns_frame.pack(fill=tk.X, padx=15, pady=8)
+        dns_frame.pack(fill=tk.X, padx=15, pady=6)
         tk.Label(dns_frame, text="DNS Activity", font=("Helvetica", 14, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=4)
 
         self.res_dns_lbl = tk.Label(dns_frame, text="Queries captured: 0 | Last: --", font=("Helvetica", 12), bg="#1A1A1A", fg="#FF00FF")
@@ -180,8 +194,6 @@ class FlukeApp:
         footer.pack(fill=tk.X)
 
     # --- EVENT HANDLERS ---
-    # Tkinter calls these automatically when the matching key/event happens. The "event"
-    # argument is required by Tkinter even when we don't need to look at it ourselves.
 
     def close_window(self, event):
         self.root.destroy()
@@ -205,7 +217,6 @@ class FlukeApp:
         self.scroll_canvas.yview_scroll(5, "units")
 
     def scroll_with_mouse_wheel(self, event):
-        # event.delta is positive when scrolling up and negative when scrolling down.
         if event.delta > 0:
             self.scroll_canvas.yview_scroll(-1, "units")
         else:
@@ -225,6 +236,14 @@ class FlukeApp:
         self.lbl_port.config(text=f"PORT:  {self.scan_results['switch_port']}")
         self.lbl_vlan.config(text=f"VLAN:  {self.scan_results['switch_vlan']}")
         self.lbl_voice.config(text=f"VOICE: {self.scan_results['switch_voice']}")
+
+        # Render PoE Results
+        if self.scan_results["poe_available"] == "Available":
+            self.res_poe_status.config(text="Status: PoE Supported (Advertised)", fg="#00E5FF")
+            self.res_poe_details.config(text=f"Power: {self.scan_results['poe_power']} | Standard: {self.scan_results['poe_class']}")
+        else:
+            self.res_poe_status.config(text="Status: No PoE Advertised on Port", fg="#888888")
+            self.res_poe_details.config(text="Standard: None / Not Supported")
 
         sp_text = f"Down: {self.scan_results['speed_down']} | Up: {self.scan_results['speed_up']} | Ping: {self.scan_results['speed_ping']}"
         dn_text = f"Queries: {self.scan_results['dns_queries']} | Domain: {self.scan_results['dns_last_domain']}"
@@ -262,6 +281,9 @@ class FlukeApp:
             "switch_vlan": "None / Untagged",
             "switch_voice": "None",
             "switch_proto": "--",
+            "poe_available": "None Detected",
+            "poe_class": "--",
+            "poe_power": "--",
             "speed_down": "Failed",
             "speed_up": "Failed",
             "speed_ping": "Failed",
@@ -289,31 +311,76 @@ class FlukeApp:
             time.sleep(1)
             seconds_left = seconds_left - 1
 
-    # --- SWITCH TOPOLOGY (CDP/LLDP via lldpd) ---
+    # --- SWITCH TOPOLOGY & POE (CDP/LLDP via lldpd) ---
 
     def query_lldpd(self):
-        # Ask the lldpd service (installed/started by install.sh) what it's heard on this port.
-        # "-f keyvalue" prints one line per fact, like:  lldp.eth0.chassis.name=SWITCH-01
         try:
             result = subprocess.run(
                 ["lldpctl", "-f", "keyvalue", INTERFACE],
                 capture_output=True, text=True, timeout=5
             )
             return result.stdout
-        except FileNotFoundError:
-            return ""
-        except subprocess.TimeoutExpired:
+        except (FileNotFoundError, subprocess.TimeoutExpired):
             return ""
 
     def get_lldp_value(self, kv_text, field_name):
-        # kv_text is many lines of "lldp.eth0.<field_name>=<value>". Find the one line that
-        # starts with our field name and return the value after the "=". If there's no such
-        # line, lldpd hasn't heard that fact, so return an empty string.
         prefix = "lldp." + INTERFACE + "." + field_name + "="
         for line in kv_text.splitlines():
             if line.startswith(prefix):
                 return line[len(prefix):]
         return ""
+
+    def evaluate_poe(self, kv_text):
+        """Extracts PoE Power TLVs from LLDP-MED (Extended Power) and CDP power TLVs."""
+        power_str = ""
+        # 1. Check LLDP-MED / dot3 power allocations
+        for line in kv_text.splitlines():
+            lowered = line.lower()
+            if "power" in lowered and ("allocated=" in lowered or "val=" in lowered or "budget=" in lowered):
+                power_str = line.split("=", 1)[1].strip()
+                break
+
+        # Fallback: Check general lldp power fields
+        if not power_str:
+            power_str = self.get_lldp_value(kv_text, "power.allocated")
+        if not power_str:
+            power_str = self.get_lldp_value(kv_text, "power.budget")
+
+        if power_str:
+            # Parse wattage or milliwatts
+            try:
+                # Value can be formatted like "15.4 W" or "15400 mW" or pure numeric
+                clean_num = "".join([c for c in power_str if c.isdigit() or c == '.'])
+                val = float(clean_num)
+                if "mw" in power_str.lower() or val > 150:
+                    watts = val / 1000.0
+                else:
+                    watts = val
+            except ValueError:
+                watts = 0.0
+
+            if watts > 0:
+                self.scan_results["poe_available"] = "Available"
+                self.scan_results["poe_power"] = f"{watts:.1f} Watts"
+
+                # Classify 802.3 IEEE PoE Standards
+                if watts <= 4.0:
+                    self.scan_results["poe_class"] = "Class 1 (802.3af Type 1)"
+                elif watts <= 7.0:
+                    self.scan_results["poe_class"] = "Class 2 (802.3af Type 1)"
+                elif watts <= 15.4:
+                    self.scan_results["poe_class"] = "Class 0/3 (802.3af PoE)"
+                elif watts <= 30.0:
+                    self.scan_results["poe_class"] = "Class 4 (802.3at PoE+)"
+                elif watts <= 60.0:
+                    self.scan_results["poe_class"] = "Class 5/6 (802.3bt 4PPoE)"
+                else:
+                    self.scan_results["poe_class"] = "Class 7/8 (802.3bt Type 4)"
+                return
+
+        self.scan_results["poe_available"] = "None Detected"
+        self.scan_results["poe_class"] = "None"
+        self.scan_results["poe_power"] = "0.0 W"
 
     def apply_switch_topology(self, kv_text):
         if kv_text.strip() == "":
@@ -324,7 +391,6 @@ class FlukeApp:
             switch_name = "Unknown"
         self.scan_results["switch_name"] = switch_name
 
-        # Different switches put the port name in different fields; try each in turn.
         port = self.get_lldp_value(kv_text, "port.ifname")
         if port == "":
             port = self.get_lldp_value(kv_text, "port.descr")
@@ -349,7 +415,6 @@ class FlukeApp:
             protocol = "--"
         self.scan_results["switch_proto"] = protocol
 
-        # Voice VLAN (LLDP-MED / CDP appliance TLV): any line mentioning "voice" with a VLAN id.
         voice = "None"
         for line in kv_text.splitlines():
             if "voice" in line.lower() and "vid=" in line:
@@ -357,11 +422,11 @@ class FlukeApp:
                 break
         self.scan_results["switch_voice"] = voice
 
+        # Evaluate PoE TLVs alongside switch identification
+        self.evaluate_poe(kv_text)
         return True
 
     def discover_switch_topology(self):
-        # Poll lldpd once a second instead of sniffing packets ourselves — lldpd already runs
-        # continuously in the background, so this usually returns data on the very first check.
         seconds_left = SWITCH_DISCOVERY_TIMEOUT
         while seconds_left >= 0:
             if not self.is_cable_connected():
@@ -383,7 +448,6 @@ class FlukeApp:
     # --- PACKET HANDLERS ---
 
     def lookup_google(self):
-        # Just triggers a real DNS lookup so there's something for parse_dns_packet to catch.
         socket.gethostbyname("google.com")
 
     def parse_dns_packet(self, packet):
@@ -410,18 +474,18 @@ class FlukeApp:
 
             self.reset_data()
 
-            # 2. SWITCH TOPOLOGY DISCOVERY (up to SWITCH_DISCOVERY_TIMEOUT seconds)
+            # 2. SWITCH TOPOLOGY & POE DISCOVERY
             start_minutes = SWITCH_DISCOVERY_TIMEOUT // 60
             start_seconds = SWITCH_DISCOVERY_TIMEOUT % 60
             self.root.after(
                 0, self.update_scanner, "TESTING NETWORK...", "#FFFF00",
-                "Mode: Switch Discovery (CDP/LLDP)", f"{start_minutes:02d}:{start_seconds:02d}"
+                "Mode: Switch & PoE Discovery", f"{start_minutes:02d}:{start_seconds:02d}"
             )
             self.discover_switch_topology()
             if not self.is_cable_connected():
                 continue
 
-            # 3. DNS MONITORING (3s active query)
+            # 3. DNS MONITORING
             self.root.after(0, self.update_scanner, "TESTING NETWORK...", "#FFFF00", "Mode: DNS Sniffing", "00:03")
             self.sniffing = True
             timer_thread = threading.Thread(target=self.countdown_timer, args=(3,))
@@ -442,7 +506,7 @@ class FlukeApp:
             if not self.is_cable_connected():
                 continue
 
-            # 4. BANDWIDTH TEST: Animated Loading Screen
+            # 4. BANDWIDTH TEST
             self.root.after(0, self.update_scanner, "TESTING NETWORK...", "#FFFF00", "Mode: Bandwidth Speed Test", "")
             self.root.after(0, self.start_loading_animation, "Connecting to closest server...")
 
