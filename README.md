@@ -4,6 +4,12 @@ Not-A-Fluke is a standalone, touchscreen-friendly network diagnostic tool for Ra
 
 ---
 
+# How to Run
+
+sudo -e python3 fluke_gui.py
+
+---
+
 ## Hardware & System Requirements
 
 - **Operating System:** Raspberry Pi OS (Debian 11 Bullseye or Debian 12 Bookworm recommended)
