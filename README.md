@@ -1,6 +1,6 @@
 # Not-A-Fluke
 
-PiScout Pro is a standalone, touchscreen-friendly network diagnostic tool for Raspberry Pi and Debian-based Linux devices. Once connected to an Ethernet drop, it detects physical carrier state, extracts switch topology via CDP/LLDP, tests active DNS lookup handling, and runs an internet bandwidth benchmark.
+Not-A-Fluke is a standalone, touchscreen-friendly network diagnostic tool for Raspberry Pi and Debian-based Linux devices. Once connected to an Ethernet drop, it detects physical carrier state, extracts switch topology via CDP/LLDP, tests active DNS lookup handling, and runs an internet bandwidth benchmark.
 
 ---
 
@@ -15,7 +15,7 @@ PiScout Pro is a standalone, touchscreen-friendly network diagnostic tool for Ra
 
 ## 1. System Package Dependencies
 
-PiScout Pro requires several OS-level packages, the Tk GUI toolkit bindings, packet capture headers, and the `lldpd` daemon to capture switch advertisements.
+Not-A-Fluke requires several OS-level packages, the Tk GUI toolkit bindings, packet capture headers, and the `lldpd` daemon to capture switch advertisements.
 
 Run the following command to install all system dependencies:
 
