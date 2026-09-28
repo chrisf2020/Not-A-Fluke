@@ -1,4 +1,4 @@
-# PiScout Pro
+# Not-A-Fluke
 
 PiScout Pro is a standalone, touchscreen-friendly network diagnostic tool for Raspberry Pi and Debian-based Linux devices. Once connected to an Ethernet drop, it detects physical carrier state, extracts switch topology via CDP/LLDP, tests active DNS lookup handling, and runs an internet bandwidth benchmark.
 
