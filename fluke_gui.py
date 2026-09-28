@@ -114,11 +114,21 @@ class FlukeApp:
     def build_results_ui(self):
         self.results_frame = tk.Frame(self.container, bg="#121212")
 
-        header = tk.Label(
-            self.results_frame, text="DIAGNOSTIC COMPLETE", font=("Helvetica", 18, "bold"),
+        # Header Frame holding Title and v0.2 Version Tag
+        header_frame = tk.Frame(self.results_frame, bg="#00E5FF")
+        header_frame.pack(fill=tk.X)
+
+        header_title = tk.Label(
+            header_frame, text="DIAGNOSTIC COMPLETE", font=("Helvetica", 18, "bold"),
             bg="#00E5FF", fg="#000000", pady=8
         )
-        header.pack(fill=tk.X)
+        header_title.pack(side=tk.LEFT, padx=15)
+
+        header_version = tk.Label(
+            header_frame, text="v0.2", font=("Helvetica", 12, "bold"),
+            bg="#00E5FF", fg="#333333", pady=8
+        )
+        header_version.pack(side=tk.LEFT)
 
         # Canvas & Scrollbar Frame to support Arrow Key Scrolling
         self.scroll_canvas = tk.Canvas(self.results_frame, bg="#121212", highlightthickness=0)
@@ -144,27 +154,30 @@ class FlukeApp:
         topo_frame.pack(fill=tk.X, padx=15, pady=6)
         tk.Label(topo_frame, text="Switch Topology", font=("Helvetica", 14, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=4)
 
-        self.lbl_sw = tk.Label(topo_frame, text="SW: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
+        self.lbl_sw = tk.Label(topo_frame, text="SW:    --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
         self.lbl_sw.pack(fill=tk.X, padx=15, pady=1)
 
-        self.lbl_ip = tk.Label(topo_frame, text="IP: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
+        self.lbl_ip = tk.Label(topo_frame, text="IP:    --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
         self.lbl_ip.pack(fill=tk.X, padx=15, pady=1)
 
-        self.lbl_port = tk.Label(topo_frame, text="PORT: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
+        self.lbl_port = tk.Label(topo_frame, text="PORT:  --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
         self.lbl_port.pack(fill=tk.X, padx=15, pady=1)
 
-        self.lbl_vlan = tk.Label(topo_frame, text="VLAN: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
+        self.lbl_vlan = tk.Label(topo_frame, text="VLAN:  --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
         self.lbl_vlan.pack(fill=tk.X, padx=15, pady=1)
 
         self.lbl_voice = tk.Label(topo_frame, text="VOICE: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
-        self.lbl_voice.pack(fill=tk.X, padx=15, pady=3)
+        self.lbl_voice.pack(fill=tk.X, padx=15, pady=1)
 
-        # --- PoE Card ---
+        self.lbl_poe_topo = tk.Label(topo_frame, text="POE:   --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
+        self.lbl_poe_topo.pack(fill=tk.X, padx=15, pady=3)
+
+        # --- Dedicated PoE Details Card ---
         poe_frame = tk.Frame(self.scroll_content, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
         poe_frame.pack(fill=tk.X, padx=15, pady=6)
-        tk.Label(poe_frame, text="Power over Ethernet (PoE)", font=("Helvetica", 14, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=4)
+        tk.Label(poe_frame, text="PoE: Power over Ethernet", font=("Helvetica", 14, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=4)
 
-        self.res_poe_status = tk.Label(poe_frame, text="Status: --", font=("Helvetica", 12, "bold"), bg="#1A1A1A", fg="#FFA500")
+        self.res_poe_status = tk.Label(poe_frame, text="PoE: Not Detected", font=("Helvetica", 12, "bold"), bg="#1A1A1A", fg="#FFA500")
         self.res_poe_status.pack(pady=1)
 
         self.res_poe_details = tk.Label(poe_frame, text="Allocated: -- | Standard: --", font=("Courier", 12), bg="#1A1A1A", fg="#76FF03")
@@ -237,12 +250,14 @@ class FlukeApp:
         self.lbl_vlan.config(text=f"VLAN:  {self.scan_results['switch_vlan']}")
         self.lbl_voice.config(text=f"VOICE: {self.scan_results['switch_voice']}")
 
-        # Render PoE Results
+        # Render PoE in Topology Card and Dedicated Card
         if self.scan_results["poe_available"] == "Available":
-            self.res_poe_status.config(text="Status: PoE Supported (Advertised)", fg="#00E5FF")
+            self.lbl_poe_topo.config(text=f"POE:   {self.scan_results['poe_power']} ({self.scan_results['poe_class']})")
+            self.res_poe_status.config(text="PoE: Supported (Advertised)", fg="#00E5FF")
             self.res_poe_details.config(text=f"Power: {self.scan_results['poe_power']} | Standard: {self.scan_results['poe_class']}")
         else:
-            self.res_poe_status.config(text="Status: No PoE Advertised on Port", fg="#888888")
+            self.lbl_poe_topo.config(text="POE:   None Advertised")
+            self.res_poe_status.config(text="PoE: Not Advertised on Port", fg="#888888")
             self.res_poe_details.config(text="Standard: None / Not Supported")
 
         sp_text = f"Down: {self.scan_results['speed_down']} | Up: {self.scan_results['speed_up']} | Ping: {self.scan_results['speed_ping']}"
@@ -333,23 +348,20 @@ class FlukeApp:
     def evaluate_poe(self, kv_text):
         """Extracts PoE Power TLVs from LLDP-MED (Extended Power) and CDP power TLVs."""
         power_str = ""
-        # 1. Check LLDP-MED / dot3 power allocations
+        # Check LLDP-MED / dot3 power allocations
         for line in kv_text.splitlines():
             lowered = line.lower()
             if "power" in lowered and ("allocated=" in lowered or "val=" in lowered or "budget=" in lowered):
                 power_str = line.split("=", 1)[1].strip()
                 break
 
-        # Fallback: Check general lldp power fields
         if not power_str:
             power_str = self.get_lldp_value(kv_text, "power.allocated")
         if not power_str:
             power_str = self.get_lldp_value(kv_text, "power.budget")
 
         if power_str:
-            # Parse wattage or milliwatts
             try:
-                # Value can be formatted like "15.4 W" or "15400 mW" or pure numeric
                 clean_num = "".join([c for c in power_str if c.isdigit() or c == '.'])
                 val = float(clean_num)
                 if "mw" in power_str.lower() or val > 150:
@@ -361,7 +373,7 @@ class FlukeApp:
 
             if watts > 0:
                 self.scan_results["poe_available"] = "Available"
-                self.scan_results["poe_power"] = f"{watts:.1f} Watts"
+                self.scan_results["poe_power"] = f"{watts:.1f}W"
 
                 # Classify 802.3 IEEE PoE Standards
                 if watts <= 4.0:
@@ -380,7 +392,7 @@ class FlukeApp:
 
         self.scan_results["poe_available"] = "None Detected"
         self.scan_results["poe_class"] = "None"
-        self.scan_results["poe_power"] = "0.0 W"
+        self.scan_results["poe_power"] = "0.0W"
 
     def apply_switch_topology(self, kv_text):
         if kv_text.strip() == "":
