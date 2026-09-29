@@ -32,6 +32,7 @@ sudo apt install -y \
     python3-pip \
     python3-tk \
     libpcap-dev \
+    scapy \
 sudo pip install speedtest-cli
 
     lldpd
