@@ -1,0 +1,6 @@
+download oracle or any vbox 
+go to https://www.raspberrypi.com/software/operating-systems/ you want the raspberry pi desktop os its the only one that works for mac n windows its gonna take a while to download 
+go into oracle and click new give it a random name and make sure the ISO file is in your downloads and the iso file should be 2022-07-01-raspios-bullseye-i386.iso 
+allocate it what ever you want for storage n ram 		
+boot it and it will eventually take you the os screen do not click the first option you want to click install that I think is under install with graphic dependences 
+once you actually get into the os you will have to apt install all the library's that are in the read me to get the fluke_gui to work  
