@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# fluke — the one command for the Pi Fluke. Type "fluke" on its own for help.
+#
+# HOW TO READ THIS FILE: every line of code has a "#" comment above it explaining it.
+# "$1" = the first word typed after "fluke" (e.g. "test"), "$2" = the second word.
+
+# Which framebuffer (/dev/fbN) is the small screen? Its driver name starts with "fb_".
+# (Linux calls each screen a "framebuffer": fb0 = HDMI, fb2 = our small screen. This finds the number.)
+TFT_NUM=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | cut -d/ -f5 | tr -d fb)
+
+# Stop the background program that watches for SPEED/END button taps (if it's running).
+stop_buttons() { sudo pkill -f 'python3 /usr/local/bin/fluke-touch' 2>/dev/null; }
+
+# Start it in the background (setsid nohup = keeps running after you close the terminal/SSH).
+start_buttons() { stop_buttons; setsid nohup fluke-touch >/dev/null 2>&1 & }
+
+# Point the text terminals (tty1-6) at a framebuffer. $1 = fb number.
+# (A mini command: "move_terminal_to 2" shows the terminal on screen 2.)
+move_terminal_to() {
+  # For each of the 6 text terminals, con2fbmap moves it onto the chosen screen.
+  for tty in 1 2 3 4 5 6; do sudo con2fbmap $tty $1; done
+}
+
+# Wipe the small screen (all zeros = black) and put the terminal back on it.
+terminal_to_tft() {
+  # Empty the buttons file so taps are ignored (no buttons are showing any more).
+  truncate -c -s 0 /tmp/pi-fluke-buttons      # empty the file = no buttons showing any more
+  # Fill the small screen with zeros = black, wiping the old results.
+  sudo dd if=/dev/zero of=/dev/fb$TFT_NUM bs=64k status=none 2>/dev/null
+  # Move the terminal back onto the small screen.
+  move_terminal_to "$TFT_NUM"
+}
+
+# Look at the first word typed after "fluke" and jump to the matching section below.
+case "$1" in
+
+  # ---------- fluke test ----------
+  test)      # run the network test once, live on the small screen
+    # Move the terminal to the HDMI screen (0) so it doesn't cover the results.
+    move_terminal_to 0          # move the terminal off the small screen so the results can show
+    # Run the test. "${2:-eth0}" = the port typed after "test", or eth0 if none.
+    netcheck "${2:-eth0}"
+    # Start the button watcher so SPEED / END on the screen work.
+    start_buttons               # make SPEED / END on the screen work
+    # Remind the user how to get the terminal back.
+    echo "(Results stay on the small screen. Tap END or type 'fluke term' to get the terminal back.)"
+    # ";;" ends this section.
+    ;;
+
+  # ---------- fluke start ----------
+  start)     # fluke mode: small screen shows the tester, auto-tests when a cable is plugged in
+    # Stop any button watcher from "fluke test" (fluke mode starts its own).
+    stop_buttons                # fluke mode starts its own button watcher
+    # Start the background service (pi-fluke.service), which runs fluke-daemon.
+    sudo systemctl start pi-fluke
+    # Tell the user.
+    echo "Fluke mode ON. Plug a cable into the ethernet port."
+    ;;
+
+  # ---------- fluke term ----------
+  term)      # give the small screen back to the terminal
+    # Stop fluke mode.
+    sudo systemctl stop pi-fluke
+    # Stop the button watcher.
+    stop_buttons
+    # Wipe the small screen and put the terminal back on it.
+    terminal_to_tft
+    # Tell the user.
+    echo "Small screen is the terminal again."
+    # If the desktop (startx) is running, it owns the terminal so the screen stays blank.
+    # (pgrep -x Xorg checks if the desktop program is running; if so, print a note.)
+    pgrep -x Xorg >/dev/null && echo "Note: the desktop (startx) is running, so the terminal can't draw. Close it or reboot."
+    ;;
+
+  # ---------- fluke calibrate (same as typing xinput-calibrator) ----------
+  calibrate) # line up the touchscreen: tap 4 crosses, then test with some taps
+    # Stop fluke mode first.
+    sudo systemctl stop pi-fluke      # fluke mode would draw over the crosses
+    # Stop the button watcher, otherwise it would take the calibration taps.
+    stop_buttons                      # the button watcher would steal the taps
+    # Move the terminal off the small screen so the crosses can show.
+    move_terminal_to 0
+    # Run the calibration program (Python).
+    fluke-calibrate
+    ;;
+
+  # ---------- fluke speed (also the SPEED button) ----------
+  speed)     # internet speed test through the ethernet jack (also the SPEED button)
+    # Move the terminal off the small screen so the results can show.
+    move_terminal_to 0
+    # Run the speed test ("${2:-eth0}" = port typed after "speed", or eth0).
+    fluke-speed "${2:-eth0}"
+    ;;
+
+  # ---------- fluke end (what the END button runs) ----------
+  end)       # what the END button does: leave the tester, terminal back on the small screen
+    # If fluke mode is running...
+    if systemctl is-active -q pi-fluke; then
+      # ...stop it (--no-block = don't wait). Its service file wipes the screen and moves the terminal back.
+      sudo systemctl stop --no-block pi-fluke     # fluke mode cleans up the screen as it stops
+    # Otherwise (after a "fluke test")...
+    else
+      # ...stop the button watcher...
+      stop_buttons
+      # ...and wipe the screen / put the terminal back ourselves.
+      terminal_to_tft
+    fi
+    ;;
+
+  # ---------- fluke boot fluke / fluke boot term ----------
+  boot)      # choose what the small screen does when the Pi turns on
+    # Look at the SECOND word.
+    case "$2" in
+      # "fluke": turn the fluke-mode service ON at every boot.
+      fluke) sudo systemctl enable -q pi-fluke;  echo "On boot: FLUKE mode." ;;
+      # "term": turn it OFF at boot, so the terminal shows on the small screen instead.
+      term)  sudo systemctl disable -q pi-fluke; echo "On boot: TERMINAL on the small screen." ;;
+      # Anything else: show how to use it.
+      *)     echo "Use:  fluke boot fluke   or   fluke boot term" ;;
+    esac
+    ;;
+
+  # ---------- fluke status ----------
+  status)    # show what's going on right now
+    # Is fluke mode running right now?
+    if systemctl is-active -q pi-fluke; then echo "Now:     FLUKE mode"; else echo "Now:     TERMINAL mode"; fi
+    # Is fluke mode set to start at boot?
+    if systemctl is-enabled -q pi-fluke; then echo "On boot: FLUKE mode"; else echo "On boot: TERMINAL mode"; fi
+    # Show the wifi IP address (what you SSH to).
+    echo "Wifi IP: $(ip -4 -br addr show wlan0 | awk '{print $3}')"
+    ;;
+
+  # --- used by the background services, you don't need to type these ---
+  # Wipe the small screen and put the terminal on it (used at boot and when fluke mode stops).
+  _terminal-to-tft)  terminal_to_tft ;;
+  # Put the terminal on HDMI (used when fluke mode starts).
+  _terminal-to-hdmi) move_terminal_to 0 ;;
+
+  # ---------- anything else ----------
+  *)         # no command (or a typo) -> show help
+    # Print everything between the two HELP words exactly as written.
+    cat <<'HELP'
+Pi Fluke commands:
+  fluke test         run the network test once (results on screen + here)
+  fluke start        FLUKE mode: small screen auto-tests every cable you plug in
+  fluke term         small screen goes back to being the terminal
+  fluke boot fluke   Pi starts in FLUKE mode when it turns on
+  fluke boot term    Pi starts with the TERMINAL on the small screen
+  fluke speed        internet speed test through the ethernet jack
+  fluke status       show the current mode, boot mode and wifi IP
+  On the small screen: tap SPEED for a speed test, END to go back to the terminal
+  xinput-calibrator  calibrate the touchscreen (tap the 4 crosses)  [same as: fluke calibrate]
+HELP
+    ;;
+# End of the choices.
+esac

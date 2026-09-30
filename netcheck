@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# netcheck — the actual "fluke" test. Checks the Pi's own wifi/SSH, then tests
+# whatever network jack the ethernet cable (eth0) is plugged into.
+#
+# Usage:  netcheck          (tests eth0)
+#         netcheck eth1     (tests a different port)
+#
+# Results print in the terminal AND show on the small screen — unless the
+# small screen is currently being used as the terminal (then it just prints).
+#
+# HOW TO READ THIS FILE: every line of code has a "#" comment above it
+# explaining what it does in plain English. Lines starting with # are ignored by the computer.
+
+# Which network port to test: the first word typed after "netcheck", or eth0 if nothing was typed.
+ETH=${1:-eth0}
+
+# ---- colours for the terminal ----
+# These are special codes that make terminal text green, red, yellow, bold, or back to normal.
+GREEN=$'\e[32m'; RED=$'\e[31m'; YELLOW=$'\e[33m'; BOLD=$'\e[1m'; RESET=$'\e[0m'
+
+# ---- screen setup ----
+# Make an empty temporary file. Every result line gets added to it, and the screen draws this file.
+SCREEN_FILE=$(mktemp)                    # lines for the small screen get collected here
+# "trap ... EXIT" = when the script ends (for any reason), delete that temporary file.
+trap 'rm -f "$SCREEN_FILE"' EXIT         # delete it when the script ends
+# Start by assuming we are allowed to draw on the small screen.
+USE_SCREEN=yes
+# Find the small screen's number: look through all screens (/sys/class/graphics/fb*) for the one whose
+# driver name starts with "fb_" (ours is fb_ili9486), then keep just its number (e.g. "2").
+TFT_NUM=$(grep -l '^fb_' /sys/class/graphics/fb*/name | cut -d/ -f5 | tr -d fb)   # small screen's fb number
+# Ask which screen terminal 1 is shown on. If it's the small screen, don't draw over the terminal.
+sudo con2fbmap 1 | grep -q "framebuffer $TFT_NUM\$" && USE_SCREEN=no            # terminal is on it? don't draw over it
+
+# out TAG "text"  — print one result to the terminal and the small screen
+# (a "function" = a mini command we can reuse. $1 is the first thing given to it, $2 the second.)
+out() {
+  # Pick how to print it depending on the tag (PASS / FAIL / INFO / HEAD).
+  case $1 in
+    # PASS -> print "PASS" in green, then the text.
+    PASS) echo "  ${GREEN}PASS${RESET} $2" ;;
+    # FAIL -> print "FAIL" in red, then the text.
+    FAIL) echo "  ${RED}FAIL${RESET} $2" ;;
+    # INFO -> print "INFO" in yellow, then the text.
+    INFO) echo "  ${YELLOW}INFO${RESET} $2" ;;
+    # HEAD -> a blank line, then a bold section title.
+    HEAD) echo; echo "${BOLD}== $2 ==${RESET}" ;;
+  # "esac" is just "case" backwards — it ends the list of choices.
+  esac
+  # Also add the line to the screen file, written as TAG|text (e.g. "PASS|link up").
+  echo "$1|$2" >> "$SCREEN_FILE"
+  # If drawing is allowed, redraw the small screen with everything so far (this is what makes it "live").
+  [ $USE_SCREEN = yes ] && fluke-screen "$SCREEN_FILE" 2>/dev/null
+}
+
+# Start the screen file fresh with a title and the current time (">" overwrites, ">>" adds).
+echo "HEAD|PI FLUKE  $(date '+%H:%M:%S')" > "$SCREEN_FILE"
+
+# ================= Part 1: the Pi's own connection =================
+# Section title.
+out HEAD "Management (wlan0/SSH)"
+
+# Ask NetworkManager (nmcli) for the state of each network device, keep only the wifi (wlan0) line,
+# and print its state + network name, e.g. "connected NicoJets".
+WIFI=$(nmcli -t -f DEVICE,STATE,CONNECTION dev | awk -F: '$1=="wlan0" {print $2" "$3}')
+# If it starts with "connected", PASS and show the wifi name (the part after "connected "); otherwise FAIL.
+if [[ $WIFI == connected* ]]; then out PASS "wifi: ${WIFI#connected }"; else out FAIL "wifi not connected"; fi
+
+# Get the wifi's IP address, e.g. "192.168.8.160/24".
+WIFI_IP=$(ip -4 -br addr show wlan0 | awk '{print $3}')
+# If there is one, show the ssh command to connect ("%/*" chops off the "/24" part).
+[ -n "$WIFI_IP" ] && out INFO "ssh admin@${WIFI_IP%/*}"
+
+# Is the SSH server running? (systemctl is-active -q = quietly answer yes/no)
+if systemctl is-active -q ssh; then out PASS "SSH server running"; else out FAIL "SSH server not running"; fi
+
+# Ping 1.1.1.1 (a public internet server) twice through the wifi. Replies = internet works.
+if ping -I wlan0 -c2 -W2 1.1.1.1 >/dev/null 2>&1; then out PASS "internet via wifi"; else out FAIL "no internet via wifi"; fi
+
+# ================= Part 2: the jack being tested =================
+# Section title, e.g. "Test port (eth0)".
+out HEAD "Test port ($ETH)"
+
+# 1. Is a live cable plugged in?  (carrier = 1 means yes)
+# The kernel keeps a file that says 1 when a live cable is connected. If it's not 1...
+if [ "$(cat /sys/class/net/$ETH/carrier 2>/dev/null)" != 1 ]; then
+  # ...FAIL and stop the whole test here ("exit 1"), because nothing else can work without a link.
+  out FAIL "no link (unplugged/dead jack)"; exit 1
+# "fi" is "if" backwards — it ends the if-block.
+fi
+# If we got here, the link is up.
+out PASS "link up"
+
+# 2. What speed did the jack negotiate?  (e.g. 1000Mb/s Full)
+# ethtool shows port details; awk picks out the "Speed:" and "Duplex:" lines and joins them.
+SPEED=$(sudo ethtool $ETH 2>/dev/null | awk -F': ' '/Speed:/ {s=$2} /Duplex:/ {d=$2} END {print s" "d}')
+# Show it.
+out INFO "speed: $SPEED"
+
+# 3. Did the network hand us an IP address (DHCP)?  Wait up to 15 seconds.
+# Start with no IP.
+IP=""
+# Repeat up to 15 times (once per second)...
+for i in $(seq 1 15); do
+  # ...look up the port's IP address...
+  IP=$(ip -4 -br addr show $ETH | awk '{print $3}')
+  # ...if we got one, stop waiting ("break" leaves the loop)...
+  [ -n "$IP" ] && break
+  # ...otherwise wait 1 second and try again.
+  sleep 1
+# "done" ends the loop.
+done
+# PASS with the address, or FAIL and stop the test (no IP = nothing else will work).
+if [ -n "$IP" ]; then out PASS "DHCP $IP"; else out FAIL "no DHCP address (15s)"; exit 1; fi
+
+# 4. Gateway (the router for that jack) — and does it answer?
+# Look up the "default route" for this port; the 3rd word is the gateway's IP.
+GATEWAY=$(ip route show default dev $ETH | awk '{print $3; exit}')
+# If we have a gateway...
+if [ -n "$GATEWAY" ]; then
+  # ...PASS and show it.
+  out PASS "gateway $GATEWAY"
+  # Ping it 3 times. Reply = PASS (and remember GW_OK=yes for the summary). No reply is only INFO,
+  # because some routers are set up to ignore pings.
+  if ping -I $ETH -c3 -W2 $GATEWAY >/dev/null 2>&1; then out PASS "gateway ping ok"; GW_OK=yes; else out INFO "gateway no ping (ICMP blocked?)"; fi
+# If there was no gateway at all...
+else
+  # ...that's a real problem.
+  out FAIL "no gateway from DHCP"
+fi
+
+# 5. DNS servers the network gave us
+# Ask NetworkManager for this port's DNS servers and put them on one line.
+DNS=$(nmcli -t -g IP4.DNS dev show $ETH | tr '\n' ' ')
+# Show them (or "none").
+out INFO "DNS: ${DNS:-none}"
+
+# 6. Can this jack reach the internet?
+# Ping 1.1.1.1 through THIS port (-I $ETH). Remember NET_OK=yes for the summary.
+if ping -I $ETH -c3 -W2 1.1.1.1 >/dev/null 2>&1; then out PASS "internet ping via $ETH"; NET_OK=yes; else out FAIL "no internet ping via $ETH"; fi
+
+# 7. Can it load a web page? (a different answer than 200 usually means a login/captive portal)
+# curl downloads a tiny test page through this port and gives back only the web status code (200 = OK).
+CODE=$(curl -s --interface $ETH -m 6 -o /dev/null -w '%{http_code}' http://detectportal.firefox.com/success.txt)
+# Decide based on the code.
+case $CODE in
+  # 200 = the page loaded normally.
+  200) out PASS "web (HTTP) via $ETH" ;;
+  # 000 = no answer at all.
+  000) out FAIL "no HTTP via $ETH" ;;
+  # Anything else = something got in the way (usually a "please log in" page).
+  *)   out INFO "HTTP $CODE (captive portal?)" ;;
+esac
+
+# 8. Do website names turn into addresses?
+# Look up the address of example.com. Works = DNS works.
+if getent hosts example.com >/dev/null; then out PASS "DNS lookup works"; else out FAIL "DNS lookup failed"; fi
+
+# 9. Which switch and port is this jack wired to?
+#    Switches announce themselves on every port: Cisco uses CDP (every 60s), others LLDP (every 30s).
+#    The lldpd service listens for these in the background, so we just ask it what it heard.
+#    A fresh cable can take up to a minute before the first announcement arrives.
+# A mini command that asks lldpd everything it heard on this port, as "name=value" lines.
+switch_info() { sudo lldpctl -f keyvalue $ETH 2>/dev/null; }
+# If it hasn't heard anything yet...
+if [ -z "$(switch_info)" ]; then
+  # ...tell the user we're waiting...
+  out INFO "waiting for switch info (up to 60s)..."
+  # ...and check once a second for up to 65 seconds, stopping as soon as something arrives.
+  for i in $(seq 1 65); do [ -n "$(switch_info)" ] && break; sleep 1; done
+fi
+# Remove the "waiting..." line from the screen file now that we're done waiting.
+sed -i '/waiting for switch/d' "$SCREEN_FILE"     # remove the "waiting" line from the screen
+# Save everything lldpd heard.
+INFO_KV=$(switch_info)
+# A mini command: "get chassis.name" finds the line "lldp.eth0.chassis.name=..." and gives back the value.
+get() { echo "$INFO_KV" | grep -m1 "^lldp\.$ETH\.$1=" | cut -d= -f2-; }   # get FIELD -> its value
+# If the switch told us anything...
+if [ -n "$INFO_KV" ]; then
+  # Switch name (hostname).
+  SWITCH=$(get chassis.name)
+  # Port name. Different switches put it in different fields, so try ifname, then descr, then local.
+  PORT=$(get port.ifname); [ -z "$PORT" ] && PORT=$(get port.descr); [ -z "$PORT" ] && PORT=$(get port.local)
+  # Data VLAN number.
+  VLAN=$(get vlan.vlan-id)
+  # Which protocol we heard it from.
+  VIA=$(get via)                                                         # CDPv2 / LLDP
+  # Voice VLAN: find a line mentioning "voice" that has a "vid=" (VLAN id) and keep the number.
+  VOICE=$(echo "$INFO_KV" | grep -i 'voice' | grep -im1 'vid=' | cut -d= -f2)   # voice VLAN (LLDP-MED), if sent
+  # Show switch name + protocol ("unknown" if the name was missing).
+  out PASS "switch: ${SWITCH:-unknown} ($VIA)"
+  # Show the port.
+  out PASS "port: ${PORT:-unknown}"
+  # Show the VLAN only if we got one.
+  [ -n "$VLAN" ] && out INFO "VLAN: $VLAN"
+  # Switch's management IP address, shown only if we got one.
+  MGMT=$(get chassis.mgmt-ip); [ -n "$MGMT" ] && out INFO "switch IP: $MGMT"
+# If the switch told us nothing...
+else
+  # ...say so (not a FAIL: home routers and some switches just don't send this).
+  out INFO "no switch info (no CDP/LLDP heard)"
+fi
+
+# ================= Summary card (looks like PiScout's screen) =================
+# Short port names like PiScout: GigabitEthernet1/0/24 -> Gi1/0/24
+# sed swaps the long words for short ones (the longest names first so they match correctly).
+SHORT_PORT=$(echo "$PORT" | sed -e 's/TenGigabitEthernet/Te/' -e 's/TwoGigabitEthernet/Tw/' \
+                               -e 's/GigabitEthernet/Gi/' -e 's/FastEthernet/Fa/')
+# Link like PiScout: "1G FD" (speed from the kernel, FD = full duplex, HD = half)
+# Read the link speed in Mb/s (e.g. 1000).
+MBPS=$(cat /sys/class/net/$ETH/speed 2>/dev/null)
+# 1000 or more -> show in G (1000 -> 1G); otherwise show in M (100 -> 100M).
+[ "${MBPS:-0}" -ge 1000 ] && LINK="$((MBPS / 1000))G" || LINK="${MBPS}M"
+# Add FD if the kernel says "full" duplex, otherwise HD (half duplex = often a bad cable/port).
+[ "$(cat /sys/class/net/$ETH/duplex 2>/dev/null)" = full ] && LINK="$LINK FD" || LINK="$LINK HD"
+# Everything between { and } gets written into the screen file (replacing the list).
+# "${X:---}" means: show X, or "--" if it's empty.
+{
+  # Title bar: "PI FLUKE" on the left, protocol on the right.
+  echo "TITLE|PI FLUKE|${VIA:-no CDP/LLDP}"
+  # Big rows, exactly like PiScout: SW / IP / PORT / VLAN / VOICE / LINK.
+  echo "FIELD|SW|${SWITCH:---}"
+  echo "FIELD|IP|${MGMT:---}"
+  echo "FIELD|PORT|${SHORT_PORT:---}"
+  echo "FIELD|VLAN|${VLAN:---}"
+  echo "FIELD|VOICE|${VOICE:-None}"
+  echo "FIELD|LINK|$LINK"
+  # Small line: our DHCP address, and yes/no for gateway and internet.
+  echo "INFO|DHCP ${IP%/*}  GW ${GW_OK:-no}  NET ${NET_OK:-no}"
+  # Small line: how to SSH into the Pi.
+  echo "INFO|ssh admin@${WIFI_IP%/*}"
+  # Touch buttons along the bottom: SPEED (speed test) and END (back to the terminal).
+  echo "BUTTONS|SPEED END"
+} > "$SCREEN_FILE"
+# Draw the summary card on the small screen (if allowed).
+[ $USE_SCREEN = yes ] && fluke-screen "$SCREEN_FILE" 2>/dev/null

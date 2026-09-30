@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+# fluke-touch — makes the on-screen buttons work (SPEED, END).
+# Runs in the background while the tester is on the small screen.
+#   END   -> runs "fluke end"   (leave the tester, small screen goes back to the terminal)
+#   SPEED -> runs "fluke speed" (internet speed test through the ethernet jack)
+#
+# Which buttons are showing right now is written by fluke-screen to /tmp/pi-fluke-buttons,
+# and the buttons are always a row across the bottom of the screen, so a tap there
+# tells us which one was pressed.
+#
+# HOW TO READ THIS FILE: every line of code has a "#" comment above it explaining it.
+
+# Load tools: json (read the calibration), subprocess (run fluke commands), sys (exit).
+import json, subprocess, sys
+# evdev = read the touchscreen's raw events.
+import evdev
+# ecodes = names for the event types (ABS_X = X position, BTN_TOUCH = finger down/up...).
+from evdev import ecodes
+
+# The file fluke-screen writes the current button names into.
+BUTTONS_FILE = "/tmp/pi-fluke-buttons"
+# How tall the button row is (the bottom 44 pixels of the screen).
+BUTTON_HEIGHT = 44                       # must match fluke-screen
+
+# Load the calibration saved by xinput-calibrator (how to turn raw touch numbers into pixels).
+cal = json.load(open("/etc/pi-fluke-touch.json"))     # made by "xinput-calibrator"
+# Screen width and height (480 x 320).
+W, H = cal["width"], cal["height"]
+
+# A function that turns a raw touch position into a screen pixel.
+def to_screen(rx, ry):
+    """Raw touch numbers -> screen pixel, using the saved calibration."""
+    # The touch chip is rotated compared to the screen, so X and Y may need swapping.
+    if cal["swap"]: rx, ry = ry, rx
+    # How far across (0 to 1), times the width = pixel X.
+    sx = (rx - cal["x_min"]) / (cal["x_max"] - cal["x_min"]) * W
+    # How far down (0 to 1), times the height = pixel Y.
+    sy = (ry - cal["y_min"]) / (cal["y_max"] - cal["y_min"]) * H
+    # Give back the pixel position.
+    return sx, sy
+
+# Find the touchscreen: the input device whose name contains "ADS7846" (our touch chip).
+touch = next(evdev.InputDevice(p) for p in evdev.list_devices()
+             if "ADS7846" in evdev.InputDevice(p).name)
+# "grab" = only this program gets the taps, so they don't also move the desktop mouse.
+touch.grab()                             # taps go only to us, not the desktop mouse
+
+# The latest finger position (none yet).
+x = y = None
+# Read touch events one by one, forever.
+for ev in touch.read_loop():
+    # X position update -> remember it.
+    if ev.type == ecodes.EV_ABS and ev.code == ecodes.ABS_X: x = ev.value
+    # Y position update -> remember it.
+    if ev.type == ecodes.EV_ABS and ev.code == ecodes.ABS_Y: y = ev.value
+    # Act when the finger lifts (a finished tap).
+    # (BTN_TOUCH with value 0 = finger lifted.)
+    if ev.type == ecodes.EV_KEY and ev.code == ecodes.BTN_TOUCH and ev.value == 0 and x is not None:
+        # Turn the last position into a screen pixel.
+        sx, sy = to_screen(x, y)
+        # Read which buttons are on screen right now...
+        try:
+            buttons = open(BUTTONS_FILE).read().split()    # e.g. ["SPEED", "END"]
+        # ...or none, if the file doesn't exist.
+        except FileNotFoundError:
+            buttons = []
+        # No buttons showing, or the tap was above the button row -> ignore this tap.
+        if not buttons or sy < H - BUTTON_HEIGHT:          # not on the button row -> ignore
+            continue
+        # Which button? Split the width into equal parts (2 buttons: left half = SPEED, right half = END).
+        pressed = buttons[min(int(sx / (W / len(buttons))), len(buttons) - 1)]
+        # Print which one (handy for troubleshooting).
+        print("pressed", pressed, flush=True)
+        # END button:
+        if pressed == "END":
+            # Give the touchscreen back to the desktop...
+            touch.ungrab()
+            # ...run "fluke end" (leave the tester)...
+            subprocess.run(["fluke", "end"])
+            # ...and stop this program.
+            sys.exit(0)
+        # SPEED button: run the speed test, then keep watching for more taps.
+        if pressed == "SPEED":
+            subprocess.run(["fluke", "speed"])

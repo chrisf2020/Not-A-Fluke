@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+# fluke-screen — draws text onto the small TFT screen.
+#
+# Usage:  fluke-screen FILE
+#   FILE has one line per row, written as  TAG|text
+#   TAG is PASS (green), FAIL (red), INFO (yellow), HEAD (blue title) or TEXT (white).
+#   PiScout-style summary card rows:
+#     TITLE|left text|right text   -> title bar with a line under it (e.g. "PI FLUKE" ... "CDPv2")
+#     FIELD|LABEL|value            -> big "LABEL: value" row (e.g. "PORT: Gi1/0/24")
+#     BIG|text                     -> big centered white text (e.g. "Waiting for link...")
+#     BUTTONS|SPEED END            -> touch buttons in a row along the bottom (fluke-touch makes them work)
+#
+# How it works: we draw the text into a picture with Pillow, convert the
+# picture into the screen's pixel format (RGB565 = 2 bytes per pixel) and
+# write those bytes straight into the screen's framebuffer device (/dev/fbN).
+#
+# HOW TO READ THIS FILE: every line of code has a "#" comment above it explaining it.
+
+# Load the tools we need: glob (find files by pattern), os (file permissions), sys (read what was typed, exit).
+import glob, os, sys
+# numpy = fast math on lots of numbers at once (we use it to convert every pixel's colour).
+import numpy as np
+# Pillow = draw pictures and text.
+from PIL import Image, ImageDraw, ImageFont
+
+
+# A function that finds the small screen and its size.
+def find_tft():
+    """Return the /dev/fbN of the small screen (its driver name starts with 'fb_', e.g. fb_ili9486)."""
+    # Go through every screen's "name" file (fb0, fb1, fb2...).
+    for path in sorted(glob.glob("/sys/class/graphics/fb*/name")):
+        # If the name starts with "fb_", it's the small SPI screen.
+        if open(path).read().startswith("fb_"):
+            # Take the folder name out of the path, e.g. "fb2".
+            fb = path.split("/")[-2]                      # e.g. "fb2"
+            # Read its size, e.g. "480,320", and split it into width and height.
+            w, h = open(f"/sys/class/graphics/{fb}/virtual_size").read().strip().split(",")
+            # Give back the device path (/dev/fb2), width and height as numbers.
+            return f"/dev/{fb}", int(w), int(h)
+    # If no screen was found, stop with an error message.
+    sys.exit("fluke-screen: small TFT screen not found")
+
+
+# Colours as (Red, Green, Blue), each 0-255.
+COLORS = {"PASS": (0, 220, 0), "FAIL": (255, 60, 60), "INFO": (255, 200, 0),
+          "HEAD": (80, 170, 255), "TEXT": (230, 230, 230)}
+# The font file we draw with (a monospace font = every letter is the same width).
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+# Each small row is 15 pixels tall.
+LINE_HEIGHT = 15
+
+# Find the screen: fb = its device, W = width (480), H = height (320).
+fb, W, H = find_tft()
+# Normal small font, size 13.
+font = ImageFont.truetype(FONT, 13)
+# Bold small font, size 13 (same file name with "-Bold").
+bold = ImageFont.truetype(FONT.replace(".ttf", "-Bold.ttf"), 13)
+# Big bold font, size 22 (for the PiScout-style card).
+big = ImageFont.truetype(FONT.replace(".ttf", "-Bold.ttf"), 22)
+# Each big row is 30 pixels tall.
+BIG_LINE_HEIGHT = 30
+# Buttons are 44 pixels tall (big enough for a finger).
+BUTTON_HEIGHT = 44                         # must match fluke-touch
+# We write the names of the buttons on screen into this file so fluke-touch knows what was tapped.
+BUTTONS_FILE = "/tmp/pi-fluke-buttons"     # tells fluke-touch which buttons are showing
+
+# Read the lines; if there are too many to fit, keep the newest ones.
+# Open the file given after "fluke-screen", and split each line at the first "|" into [TAG, text].
+rows = [line.rstrip("\n").split("|", 1) for line in open(sys.argv[1]) if "|" in line]
+# If this is the plain list (not the big card or buttons)...
+if not any(tag in ("TITLE", "FIELD", "BIG", "BUTTONS") for tag, _ in rows):
+    # ...keep only as many of the newest lines as fit on the screen (320 / 15 = 21).
+    rows = rows[-(H // LINE_HEIGHT):]
+
+# Draw each row.
+# Make a blank black picture the size of the screen.
+img = Image.new("RGB", (W, H), "black")
+# Get a "pen" to draw on it.
+draw = ImageDraw.Draw(img)
+# y = how far down the screen we are (in pixels). Start at the top.
+y = 1
+# The names of the buttons to draw at the bottom (filled in if there's a BUTTONS row).
+buttons = []
+# Go through each row one by one.
+for tag, text in rows:
+    # BUTTONS row: just remember the names, e.g. ["SPEED", "END"]; they're drawn after all the other rows.
+    if tag == "BUTTONS":                                          # drawn at the bottom, after the loop
+        buttons = text.split()
+        # Skip to the next row.
+        continue
+    # TITLE row: the title bar at the top.
+    if tag == "TITLE":                                            # title bar + line under it
+        # Split "PI FLUKE|CDPv2" into left and right parts.
+        left, _, right = text.partition("|")
+        # Draw the left part in blue at the left edge.
+        draw.text((6, y), left, font=big, fill=COLORS["HEAD"])
+        # Draw the right part in yellow, lined up to the right edge (anchor="ra" = right-aligned).
+        draw.text((W - 6, y), right, font=big, fill=COLORS["INFO"], anchor="ra")
+        # Move down one big row.
+        y += BIG_LINE_HEIGHT
+        # Draw a white line across the screen under the title.
+        draw.line((0, y, W, y), fill=COLORS["TEXT"], width=2)
+        # A little extra space under the line.
+        y += 8
+        # Skip to the next row.
+        continue
+    # FIELD row: big "LABEL: value", e.g. "PORT: Gi1/0/24".
+    if tag == "FIELD":                                            # big "LABEL: value"
+        # Split "PORT|Gi1/0/24" into label and value.
+        label, _, value = text.partition("|")
+        # Draw "PORT:" in blue on the left.
+        draw.text((6, y), label + ":", font=big, fill=COLORS["HEAD"])
+        # Draw the value in white, starting 110 pixels in (cut to 26 letters so it fits).
+        draw.text((110, y), value[:26], font=big, fill=COLORS["TEXT"])
+        # Move down one big row.
+        y += BIG_LINE_HEIGHT
+        # Skip to the next row.
+        continue
+    # BIG row: big text in the middle, e.g. "Waiting for".
+    if tag == "BIG":                                              # big centered text
+        # Draw it centred across the screen (anchor="ma" = middle).
+        draw.text((W // 2, y), text, font=big, fill=COLORS["TEXT"], anchor="ma")
+        # Move down one big row.
+        y += BIG_LINE_HEIGHT
+        # Skip to the next row.
+        continue
+    # PASS / FAIL / INFO row (the live list).
+    if tag in ("PASS", "FAIL", "INFO"):
+        # Draw the coloured word (green PASS, red FAIL, yellow INFO) at the left.
+        draw.text((4, y), tag, font=bold, fill=COLORS[tag])      # coloured status word
+        # Draw the message after it in white (cut to 53 letters so it fits).
+        draw.text((44, y), text[:53], font=font, fill=COLORS["TEXT"])
+    # Any other row (HEAD titles, TEXT).
+    else:
+        # Draw it in bold, in its colour (blue for HEAD, white otherwise).
+        draw.text((4, y), text[:58], font=bold, fill=COLORS.get(tag, COLORS["TEXT"]))
+    # Move down one small row.
+    y += LINE_HEIGHT
+
+# Buttons: equal-width boxes across the bottom of the screen, e.g. [ SPEED ][ END ]
+# Each button's width = screen width / number of buttons (2 buttons -> 240 pixels each).
+bw = W // max(len(buttons), 1)
+# For each button (i = 0, 1, ...; name = "SPEED", "END")...
+for i, name in enumerate(buttons):
+    # ...work out its box: (left, top, right, bottom), with a 3-pixel gap around it...
+    box = (i * bw + 3, H - BUTTON_HEIGHT + 3, (i + 1) * bw - 3, H - 3)
+    # ...pick its colour: red for END, blue for the others...
+    fill = (170, 30, 30) if name == "END" else (30, 90, 170)             # END red, others blue
+    # ...draw the box with rounded corners...
+    draw.rounded_rectangle(box, radius=8, fill=fill)
+    # ...and write its name in the middle of the box.
+    draw.text(((box[0] + box[2]) // 2, (box[1] + box[3]) // 2), name, font=big, fill="white", anchor="mm")
+# Tell fluke-touch which buttons are on screen now (empty = none, taps are ignored).
+# "try ... except" = if anything goes wrong writing the file, just skip it (the screen still draws).
+try:
+    # If the file already exists, open it and empty it (this works even if another user made it).
+    if os.path.exists(BUTTONS_FILE):       # overwrite it (works even if another user made it)
+        fd = os.open(BUTTONS_FILE, os.O_WRONLY | os.O_TRUNC)
+    # If not, create it...
+    else:                                  # first time: create it, writable by everyone
+        fd = os.open(BUTTONS_FILE, os.O_WRONLY | os.O_CREAT, 0o666)
+        # ...and let every user write to it (fluke mode runs as root, "fluke test" runs as you).
+        os.fchmod(fd, 0o666)
+    # Write the button names, e.g. "SPEED END".
+    os.write(fd, " ".join(buttons).encode())
+    # Close the file.
+    os.close(fd)
+# If something failed, ignore it.
+except OSError:
+    pass
+
+# Convert 24-bit colour (R,G,B) to the screen's 16-bit RGB565 and write it out.
+# Turn the picture into a grid of numbers: [row][column][R, G, B].
+px = np.asarray(img, dtype=np.uint16)
+# Squeeze each pixel into 16 bits: 5 bits red, 6 bits green, 5 bits blue (that's what the screen expects).
+rgb565 = ((px[..., 0] >> 3) << 11) | ((px[..., 1] >> 2) << 5) | (px[..., 2] >> 3)
+# Open the screen's device file for writing...
+with open(fb, "wb") as f:
+    # ...and write all the pixels in one go. The picture appears instantly.
+    f.write(rgb565.astype("<u2").tobytes())

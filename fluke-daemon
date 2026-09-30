@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# fluke-daemon — "fluke mode". Runs in the background (as the pi-fluke service).
+# Shows a "ready" screen, and every time a cable is plugged into eth0 it runs
+# netcheck automatically. Unplug and plug into the next jack to test again.
+# You don't run this by hand — use:  fluke start   /   fluke term
+#
+# HOW TO READ THIS FILE: every line of code has a "#" comment above it explaining it.
+
+# The port we watch for a cable.
+ETH=eth0
+# Where we write the lines for the "waiting" screen (/run is a temporary folder in memory).
+READY_FILE=/run/pi-fluke-ready.txt
+
+# A mini command that draws the "Waiting for link..." screen.
+show_ready() {
+  # Get the wifi IP so we can show the ssh command.
+  WIFI_IP=$(ip -4 -br addr show wlan0 | awk '{print $3}')
+  # Everything between { and } is written into READY_FILE.
+  {                                    # looks like PiScout's "Waiting for link" screen
+    # Title bar.
+    echo "TITLE|PI FLUKE|"
+    # Empty big line (spacing).
+    echo "BIG|"
+    # Big centered text, over two lines.
+    echo "BIG|Waiting for"
+    echo "BIG|link..."
+    # Empty big line (spacing).
+    echo "BIG|"
+    # Small line with the ssh command ("%/*" removes the "/24").
+    echo "INFO|ssh admin@${WIFI_IP%/*}"
+    # An END button at the bottom (leave fluke mode).
+    echo "BUTTONS|END"
+  } > "$READY_FILE"
+  # Draw it on the small screen.
+  fluke-screen "$READY_FILE"
+}
+
+# Show the waiting screen once at the start.
+show_ready
+# Start the button watcher in the background ("&" = don't wait for it) so SPEED / END taps work.
+fluke-touch &              # makes the on-screen SPEED / END buttons work
+# LAST = was a cable plugged in last time we checked? (0 = no)
+LAST=0
+# COUNT = how many seconds we've been running (used for refreshing the screen).
+COUNT=0
+# Repeat forever (until the service is stopped).
+while true; do
+  # Read the kernel's cable file: 1 = cable plugged in, 0 = not.
+  NOW=$(cat /sys/class/net/$ETH/carrier 2>/dev/null || echo 0)   # 1 = cable plugged in
+  # If a cable is in NOW but wasn't LAST time -> it was just plugged in...
+  if [ "$NOW" = 1 ] && [ "$LAST" != 1 ]; then
+    # ...so run the full test.
+    netcheck $ETH          # cable just plugged in -> run the test (results stay on screen)
+  # If there's no cable NOW but there was LAST time -> it was just unplugged...
+  elif [ "$NOW" != 1 ] && [ "$LAST" = 1 ]; then
+    # ...so go back to the waiting screen.
+    show_ready             # cable just unplugged -> back to the ready screen
+  fi
+  # while nothing is plugged in, refresh the ready screen every 10s (wifi IP may change)
+  # Add 1 to the counter.
+  COUNT=$((COUNT + 1))
+  # If no cable, and the counter is a multiple of 10, redraw the waiting screen.
+  [ "$NOW" != 1 ] && [ $((COUNT % 10)) = 0 ] && show_ready
+  # Remember this check for next time.
+  LAST=$NOW
+  # Wait 1 second, then check again.
+  sleep 1
+done

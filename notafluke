@@ -1,0 +1,3 @@
+#!/bin/bash
+# notafluke — shortcut to launch fluke-gui.py with the root privileges it needs.
+exec sudo "$(dirname "$(readlink -f "$0")")/fluke-gui.py" "$@"

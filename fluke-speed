@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# fluke-speed — internet speed test through the jack being tested (eth0).
+# Uses speedtest-cli (the free Speedtest.net servers). Takes about 20-40 seconds.
+# Run it with:  fluke speed      (or tap SPEED on the small screen)
+#
+# HOW TO READ THIS FILE: every line of code has a "#" comment above it explaining it.
+
+# Which port to test: the word typed after "fluke speed", or eth0.
+ETH=${1:-eth0}
+# Make a temporary file for the screen lines, and delete it when the script ends.
+SCREEN_FILE=$(mktemp); trap 'rm -f "$SCREEN_FILE"' EXIT
+
+# card TITLE-RIGHT LINE...  — draw a PiScout-style card with SPEED/END buttons at the bottom
+# (A mini command. $1 = text for the top-right corner, the rest = the lines to show.)
+card() {
+  # Write the title bar, then every line given ("shift" drops $1 so "$@" is just the lines), then the buttons.
+  { echo "TITLE|PI FLUKE|$1"; shift; printf '%s\n' "$@"; echo "BUTTONS|SPEED END"; } > "$SCREEN_FILE"
+  # Draw it on the small screen.
+  fluke-screen "$SCREEN_FILE" 2>/dev/null
+}
+
+# The speed test has to go out through the ethernet jack, so we need its IP address.
+# Get the port's IP (e.g. 10.10.120.55/24), then remove the "/24" part.
+IP=$(ip -4 -br addr show $ETH | awk '{print $3}'); IP=${IP%/*}
+# No IP = not plugged into a working jack...
+if [ -z "$IP" ]; then
+  # ...say so in the terminal...
+  echo "No IP on $ETH — plug into a working jack first."
+  # ...and on the screen...
+  card "SPEED" "BIG|" "BIG|No IP on $ETH" "BIG|plug in first"
+  # ...and stop.
+  exit 1
+fi
+
+# Tell the user it's starting (terminal + screen).
+echo "Speed test through $ETH ($IP)... (20-40 seconds)"
+card "SPEED" "BIG|" "BIG|Testing speed..." "BIG|(20-40 sec)"
+
+# --simple prints:  Download: 94.1 Mbit/s / Upload: 20.5 Mbit/s  (we drop its Ping line, see below)
+# --source makes it go out through the ethernet jack instead of wifi.
+# (--secure = use https. grep -v '^Ping' = throw away speedtest's own ping line.)
+RESULT=$(speedtest-cli --simple --secure --source "$IP" 2>&1 | grep -v '^Ping')
+# Show the raw result in the terminal.
+echo "$RESULT"
+
+# (speedtest-cli's own ping number is often wrong, so ping 1.1.1.1 ourselves: 4 pings, average time)
+# The ping summary line looks like "rtt min/avg/max/mdev = 20/28/35/5 ms"; the 5th "/" part is the average.
+PING=$(ping -I $ETH -c4 -q 1.1.1.1 2>/dev/null | awk -F/ '/rtt/ {printf "%.0f ms", $5}')
+# From "Download: 94.1 Mbit/s" keep "94.1 Mbit/s".
+DOWN=$(echo "$RESULT" | awk '/^Download/ {print $2" "$3}')
+# From "Upload: 20.5 Mbit/s" keep "20.5 Mbit/s".
+UP=$(echo "$RESULT" | awk '/^Upload/ {print $2" "$3}')
+
+# If we got a download number, the test worked...
+if [ -n "$DOWN" ]; then
+  # ...show the ping in the terminal...
+  echo "Ping: $PING"
+  # ...and the results card on the screen: DOWN / UP / PING.
+  card "SPEED" "FIELD|DOWN|$DOWN" "FIELD|UP|$UP" "FIELD|PING|$PING" "INFO|through $ETH ($IP)"
+# Otherwise it failed (blocked, no internet...)...
+else
+  # ...show "failed" and the start of the error message.
+  card "SPEED" "BIG|" "BIG|Speed test failed" "INFO|${RESULT:0:50}"
+  # Stop with an error.
+  exit 1
+fi
