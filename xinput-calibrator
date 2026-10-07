@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-# xinput-calibrator — shortcut for "fluke calibrate" (touchscreen calibration)
-# "exec" = replace this script with the command "fluke calibrate" (so typing either one does the same thing).
-exec fluke calibrate
