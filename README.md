@@ -6,7 +6,16 @@ Not-A-Fluke is a standalone, touchscreen-friendly network diagnostic tool for Ra
 
 # How to Run
 
-sudo -e python3 fluke_gui.py
+| Command | What it does |
+|---|---|
+| `notafluke` | start the GUI on the small screen |
+| `notafluke stop` | close it and put the terminal back on the small screen |
+| `notafluke term` | put the terminal back on the small screen (if it's blank) |
+| `notafluke calibrate` | line up the touchscreen |
+| `notafluke log` | show the GUI's output / errors |
+| `startx` | the Raspberry Pi desktop on the small screen (log out to get back to the CLI) |
+
+Files: `fluke-gui.py` (the GUI), `notafluke` (the launcher), `fluke-calibrate` (touchscreen calibration).
 
 ---
 
