@@ -36,7 +36,7 @@ from logging.handlers import RotatingFileHandler
 import speedtest
 from scapy.all import AsyncSniffer
 from scapy.layers.dns import DNS, DNSQR
-from scapy.contrib.cdp import CDPMsgPowerAvailable
+#from scapy.contrib.cdp import CDPMsgPowerAvailable
 
 VERSION = "0.5"
 
