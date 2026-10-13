@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # fluke-gui — full-screen touchscreen network tester for the small screen (Tkinter).
-# Start it with:  notafluke      (or directly: sudo python3 fluke-gui.py)
+# Start it with:   notafluke      (or directly: sudo python3 fluke-gui.py)
 #
 # THE BUG THIS FIXES: it used to sniff for CDP/LLDP packets itself with scapy, for a fixed
 # 30 seconds. Cisco only sends a CDP announcement every ~60s (LLDP is ~30s), so that window
@@ -14,9 +14,8 @@
 # mid-scan). Events and errors go to /var/log/fluke-gui/events.log (rotating). Past scans can
 # be browsed with the History button on screen, or printed over SSH with:  python3 fluke-gui.py --history
 #
-# v0.5 ADDED: version number (top right), up/down arrow buttons, a working DNS test,
-# a PoE line (from what the switch announces), a Wi-Fi scanner (nearby APs + AP info),
-# a bandwidth rating, and an Exit button that hands the small screen back to the terminal (CLI).
+# v0.6 ADDED: IPv4 configuration & DHCP card (IP address, CIDR prefix, default gateway,
+# DHCP server, lease duration, domain suffix, and DHCP acquisition time).
 
 import os
 import re
@@ -38,7 +37,7 @@ from scapy.all import AsyncSniffer
 from scapy.layers.dns import DNS, DNSQR
 from scapy.contrib.cdp import CDPMsgPowerAvailable
 
-VERSION = "0.5"
+VERSION = "0.6"
 
 INTERFACE = "eth0"
 WIFI_INTERFACE = "wlan0"    # the Pi's own wifi, used by the Wi-Fi scanner
@@ -230,10 +229,16 @@ def format_record_detail(record):
         "",
         f"SW:    {record.get('switch_name', '--')}",
         f"VIA:   {record.get('switch_proto', '--')}",
-        f"IP:    {record.get('switch_ip', '--')}",
+        f"SW IP: {record.get('switch_ip', '--')}",
         f"PORT:  {record.get('switch_port', '--')}",
         f"VLAN:  {record.get('switch_vlan', '--')}",
         f"VOICE: {record.get('switch_voice', '--')}",
+        "",
+        f"MY IP: {record.get('eth_ip', '--')}",
+        f"GATE:  {record.get('eth_gateway', '--')}",
+        f"DHCP:  {record.get('dhcp_server', '--')} ({record.get('dhcp_time', '--')})",
+        f"LEASE: {record.get('dhcp_lease', '--')}",
+        f"DOM:   {record.get('eth_domain', '--')}",
         "",
         f"Down: {record.get('speed_down', '--')}",
         f"Up:   {record.get('speed_up', '--')}",
@@ -260,24 +265,24 @@ def print_history():
         print("No scans logged yet.")
         return
 
-    print(f"{'STARTED':<23} {'SWITCH':<22} {'PORT':<14} {'DOWN':<13} {'UP':<13} {'DONE'}")
+    print(f"{'STARTED':<23} {'SWITCH':<16} {'MY IP':<18} {'PORT':<10} {'DOWN':<11} {'DONE'}")
     for record in reversed(records):
         done = "yes" if record.get("complete") else "no"
         print(
             f"{format_stamp(record.get('started_at')):<23} "
-            f"{str(record.get('switch_name', '--'))[:21]:<22} "
-            f"{str(record.get('switch_port', '--'))[:13]:<14} "
-            f"{str(record.get('speed_down', '--')):<13} "
-            f"{str(record.get('speed_up', '--')):<13} "
+            f"{str(record.get('switch_name', '--'))[:15]:<16} "
+            f"{str(record.get('eth_ip', '--'))[:17]:<18} "
+            f"{str(record.get('switch_port', '--'))[:9]:<10} "
+            f"{str(record.get('speed_down', '--')):<11} "
             f"{done}"
         )
 
 
-# --- NETWORK HELPERS (v0.5) ---
+# --- NETWORK HELPERS (v0.6) ---
 
 #--------------------------------------------------------------------------
 # get_eth_ip
-# the IPv4 address on the test port, e.g. "192.168.1.50" ("" if none)
+# the IPv4 address on the test port without prefix, e.g. "192.168.1.50"
 #--------------------------------------------------------------------------
 def get_eth_ip():
     result = subprocess.run(["ip", "-4", "-br", "addr", "show", INTERFACE], capture_output=True, text=True)
@@ -285,6 +290,66 @@ def get_eth_ip():
     if len(words) >= 3:
         return words[2].split("/")[0]
     return ""
+
+
+#--------------------------------------------------------------------------
+# format_lease_time
+# turns raw seconds into a human-readable duration (e.g. 86400 -> "24h")
+#--------------------------------------------------------------------------
+def format_lease_time(seconds_str):
+    try:
+        sec = int(seconds_str)
+        if sec < 60:
+            return f"{sec}s"
+        if sec < 3600:
+            return f"{sec // 60}m"
+        if sec < 86400:
+            return f"{round(sec / 3600, 1):g}h"
+        return f"{round(sec / 86400, 1):g}d"
+    except (ValueError, TypeError):
+        return seconds_str
+
+
+#--------------------------------------------------------------------------
+# get_eth_network_info
+# reads IP, subnet prefix, gateway, and DHCP fields using nmcli dev show
+# output: dict with keys ip, gateway, dhcp_server, lease, domain
+#--------------------------------------------------------------------------
+def get_eth_network_info():
+    info = {
+        "ip": "--",
+        "gateway": "--",
+        "dhcp_server": "--",
+        "lease": "--",
+        "domain": "--"
+    }
+    result = subprocess.run(["nmcli", "-t", "dev", "show", INTERFACE], capture_output=True, text=True)
+    if result.returncode != 0:
+        return info
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(":", 1)
+        if len(parts) < 2:
+            continue
+        key, val = parts[0].strip(), parts[1].strip()
+
+        if key.startswith("IP4.ADDRESS") and info["ip"] == "--":
+            info["ip"] = val
+        elif key == "IP4.GATEWAY" and val != "":
+            info["gateway"] = val
+        elif key.startswith("IP4.DOMAIN") and info["domain"] == "--":
+            info["domain"] = val
+        elif "dhcp_server_identifier" in key:
+            info["dhcp_server"] = val
+        elif "dhcp_lease_time" in key:
+            info["lease"] = format_lease_time(val)
+        elif "domain_name" in key and info["domain"] == "--":
+            info["domain"] = val
+
+    return info
 
 
 #--------------------------------------------------------------------------
@@ -305,9 +370,7 @@ def get_dns_servers():
 #--------------------------------------------------------------------------
 # dns_lookup
 # sends ONE real DNS question to a DNS server, forced out of the test port,
-# and times the answer. (The old version used socket.gethostbyname, which
-# could go out the wifi instead, and it fired before the sniffer had started,
-# so the DNS card often showed 0 queries.)
+# and times the answer.
 # output: (worked True/False, text like "17 ms" or "no reply")
 #--------------------------------------------------------------------------
 def dns_lookup(server, name):
@@ -465,8 +528,7 @@ def signal_color(dbm):
 #--------------------------------------------------------------------------
 # estimate_distance
 # ROUGH distance to an AP from its signal. Assumes the AP transmits at 20 dBm
-# and indoor walls/people (loss factor 3.3). Can easily be half or double the
-# real distance - good for "which AP is closer" and for walking towards one.
+# and indoor walls/people (loss factor 3.3).
 #--------------------------------------------------------------------------
 def estimate_distance(dbm, freq):
     if freq <= 0:
@@ -490,7 +552,7 @@ def format_ap_detail(ap):
     else:
         band = "6 GHz"
 
-    quality = 2 * (ap["signal"] + 100)   # -50 dBm or better = 100%, -100 dBm = 0%
+    quality = 2 * (ap["signal"] + 100)
     if quality > 100:
         quality = 100
     if quality < 0:
@@ -541,7 +603,6 @@ class FlukeApp:
         self.root.configure(bg="#121212")
         self.root.bind("<Escape>", self.close_window)
 
-        # Which screen is showing, and where the History "Back" button should return to
         self.current_view = "scanner"
         self.return_view = "scanner"
         self.history_records = []
@@ -549,12 +610,9 @@ class FlukeApp:
         self.wifi_scanning = False
         self.exit_armed = False
 
-        # Finger drag scrolling: did the finger move far enough to count as a drag?
-        # (if so, the button under the finger shouldn't also get pressed)
         self.drag_start_y = 0
         self.drag_moved = False
 
-        # Progress bar visual styling
         self.style = ttk.Style()
         self.style.theme_use('default')
         self.style.configure(
@@ -564,24 +622,20 @@ class FlukeApp:
             thickness=14
         )
 
-        # Top bar: title on the left, version number top right
         top_bar = tk.Frame(root, bg="#2B2B2B")
         top_bar.pack(side=tk.TOP, fill=tk.X)
         tk.Label(top_bar, text="NOT-A-FLUKE", font=("Helvetica", 11, "bold"), bg="#2B2B2B", fg="#00E5FF").pack(side=tk.LEFT, padx=6)
         tk.Label(top_bar, text="v" + VERSION, font=("Helvetica", 11, "bold"), bg="#2B2B2B", fg="#888888").pack(side=tk.RIGHT, padx=6)
 
-        # Up / down arrow buttons down the right-hand side (scroll whatever page is showing)
         arrow_strip = tk.Frame(root, bg="#121212", width=54)
         arrow_strip.pack(side=tk.RIGHT, fill=tk.Y)
         arrow_strip.pack_propagate(False)
         self.make_arrow(arrow_strip, "▲", -1)
         self.make_arrow(arrow_strip, "▼", 1)
 
-        # Root Container
         self.container = tk.Frame(root, bg="#121212")
         self.container.pack(expand=True, fill=tk.BOTH)
 
-        # Build UI Views
         self.build_scanner_ui()
         self.build_results_ui()
         self.build_history_ui()
@@ -590,7 +644,6 @@ class FlukeApp:
         self.build_ap_ui()
         self.show_scanner_ui()
 
-        # Shared Diagnostic Storage
         self.scan_results = {
             "started_at": "--",
             "finished_at": "--",
@@ -602,6 +655,12 @@ class FlukeApp:
             "switch_vlan": "--",
             "switch_voice": "--",
             "switch_proto": "--",
+            "eth_ip": "--",
+            "eth_gateway": "--",
+            "dhcp_server": "--",
+            "dhcp_lease": "--",
+            "eth_domain": "--",
+            "dhcp_time": "--",
             "speed_down": "--",
             "speed_up": "--",
             "speed_ping": "--",
@@ -615,8 +674,6 @@ class FlukeApp:
 
         self.running = True
         self.sniffing = False
-        # PoE: listen for Cisco CDP packets the whole time. lldpd reads CDP for the switch
-        # name/port, but it doesn't pass on the "Power Available" part, so we read that here.
         self.cdp_poe = ""
         try:
             self.cdp_sniffer = AsyncSniffer(
@@ -632,12 +689,6 @@ class FlukeApp:
 
     # --- UI BUILDERS ---
 
-    #--------------------------------------------------------------------------
-    # make_button
-    # builds a big touch-friendly button in the dark theme (caller packs it)
-    # input: parent (widget), text (label), command (function to call on tap)
-    # output: the tk.Button
-    #--------------------------------------------------------------------------
     def make_button(self, parent, text, command):
         return tk.Button(
             parent, text=text, command=command, font=("Helvetica", 14, "bold"),
@@ -645,11 +696,6 @@ class FlukeApp:
             padx=12, pady=6
         )
 
-    #--------------------------------------------------------------------------
-    # make_arrow
-    # one big arrow button on the right-hand strip. Holding it down keeps scrolling.
-    # input: parent, symbol ("▲" or "▼"), direction (-1 = up, 1 = down)
-    #--------------------------------------------------------------------------
     def make_arrow(self, parent, symbol, direction):
         arrow = tk.Label(
             parent, text=symbol, font=("DejaVu Sans", 22, "bold"),
@@ -659,10 +705,6 @@ class FlukeApp:
         arrow.bind("<ButtonPress-1>", lambda event: self.arrow_pressed(arrow, direction))
         arrow.bind("<ButtonRelease-1>", lambda event: self.arrow_released(arrow))
 
-    #--------------------------------------------------------------------------
-    # make_bottom_bar
-    # the History / Wi-Fi / Exit buttons along the bottom of the main screens
-    #--------------------------------------------------------------------------
     def make_bottom_bar(self, parent):
         bar = tk.Frame(parent, bg="#121212")
         bar.pack(side=tk.BOTTOM, fill=tk.X, pady=4)
@@ -673,12 +715,6 @@ class FlukeApp:
         exit_button.pack(side=tk.LEFT, expand=True)
         return exit_button
 
-    #--------------------------------------------------------------------------
-    # make_scroll_area
-    # a scrollable box: put widgets inside the returned frame, the canvas shows
-    # the part that fits (scroll it with the arrows or a finger drag)
-    # output: (canvas, inner frame)
-    #--------------------------------------------------------------------------
     def make_scroll_area(self, parent):
         canvas = tk.Canvas(parent, bg="#121212", highlightthickness=0)
         canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -709,7 +745,6 @@ class FlukeApp:
         )
         self.timer_label.pack(pady=2)
 
-        # Loading container for bandwidth testing
         self.loading_frame = tk.Frame(self.scanner_frame, bg="#121212")
         self.loading_text = tk.Label(
             self.loading_frame, text="", font=("Helvetica", 14),
@@ -733,10 +768,8 @@ class FlukeApp:
         )
         header.pack(fill=tk.X)
 
-        # Button bar is packed before the canvas so it stays visible while the cards scroll
         self.results_exit_button = self.make_bottom_bar(self.results_frame)
 
-        # Canvas & Scrollbar Frame to support Arrow Key Scrolling
         self.scroll_canvas = tk.Canvas(self.results_frame, bg="#121212", highlightthickness=0)
         self.scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -746,16 +779,14 @@ class FlukeApp:
         self.scroll_content.bind("<Configure>", self.update_scroll_region)
         self.scroll_canvas.bind("<Configure>", self.resize_scroll_content)
 
-        # Keyboard and Mousewheel bindings for scrolling
         self.root.bind("<Up>", self.scroll_up)
         self.root.bind("<Down>", self.scroll_down)
-        self.root.bind("<Prior>", self.scroll_page_up)     # Page Up
-        self.root.bind("<Next>", self.scroll_page_down)    # Page Down
+        self.root.bind("<Prior>", self.scroll_page_up)
+        self.root.bind("<Next>", self.scroll_page_down)
         self.root.bind("<MouseWheel>", self.scroll_with_mouse_wheel)
         self.root.bind("<Button-4>", self.scroll_up)
         self.root.bind("<Button-5>", self.scroll_down)
 
-        # Touchscreen: drag a finger up/down anywhere on the results to scroll them
         self.root.bind_all("<ButtonPress-1>", self.drag_start, add="+")
         self.root.bind_all("<B1-Motion>", self.drag_move, add="+")
 
@@ -774,7 +805,6 @@ class FlukeApp:
         self.lbl_sw = tk.Label(topo_frame, text="SW: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w", justify=tk.LEFT, wraplength=360)
         self.lbl_sw.pack(fill=tk.X, padx=15, pady=1)
 
-        # CDP or LLDP - on its own line so a long switch name doesn't push it off the screen
         self.lbl_via = tk.Label(topo_frame, text="VIA: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
         self.lbl_via.pack(fill=tk.X, padx=15, pady=1)
 
@@ -790,9 +820,28 @@ class FlukeApp:
         self.lbl_voice = tk.Label(topo_frame, text="VOICE: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
         self.lbl_voice.pack(fill=tk.X, padx=15, pady=1)
 
-        # PoE: what the switch says about power on this port (the Pi can't measure voltage itself)
         self.lbl_poe = tk.Label(topo_frame, text="POE: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#76FF03", anchor="w")
         self.lbl_poe.pack(fill=tk.X, padx=15, pady=3)
+
+        # --- IPv4 & DHCP Card (v0.6) ---
+        ip_frame = tk.Frame(self.scroll_content, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
+        ip_frame.pack(fill=tk.X, padx=15, pady=8)
+        tk.Label(ip_frame, text="IPv4 & DHCP Setup", font=("Helvetica", 14, "bold"), bg="#1A1A1A", fg="#FFFFFF").pack(pady=4)
+
+        self.lbl_my_ip = tk.Label(ip_frame, text="IP: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#00E5FF", anchor="w")
+        self.lbl_my_ip.pack(fill=tk.X, padx=15, pady=1)
+
+        self.lbl_gateway = tk.Label(ip_frame, text="GATEWAY: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#00E5FF", anchor="w")
+        self.lbl_gateway.pack(fill=tk.X, padx=15, pady=1)
+
+        self.lbl_dhcp_srv = tk.Label(ip_frame, text="DHCP: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#00E5FF", anchor="w")
+        self.lbl_dhcp_srv.pack(fill=tk.X, padx=15, pady=1)
+
+        self.lbl_lease = tk.Label(ip_frame, text="LEASE: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#00E5FF", anchor="w")
+        self.lbl_lease.pack(fill=tk.X, padx=15, pady=1)
+
+        self.lbl_domain = tk.Label(ip_frame, text="DOMAIN: --", font=("Courier", 13, "bold"), bg="#1A1A1A", fg="#00E5FF", anchor="w")
+        self.lbl_domain.pack(fill=tk.X, padx=15, pady=3)
 
         # --- Bandwidth Card ---
         speed_frame = tk.Frame(self.scroll_content, bg="#1A1A1A", bd=2, relief=tk.RIDGE)
@@ -816,19 +865,12 @@ class FlukeApp:
         self.res_dns_lbl = tk.Label(dns_frame, text="Queries captured: 0 | Last: --", font=("Helvetica", 12), bg="#1A1A1A", fg="#FF00FF")
         self.res_dns_lbl.pack(pady=(0, 4))
 
-        # Footer
         footer = tk.Label(
             self.scroll_content, text="Arrows / drag to scroll  |  Unplug cable to reset",
             font=("Helvetica", 10), bg="#121212", fg="#888888", pady=10
         )
         footer.pack(fill=tk.X)
 
-    #--------------------------------------------------------------------------
-    # build_history_ui
-    # builds the paged list of past scans (6 per page, one big button each)
-    # input: none
-    # output: none (creates self.history_frame, self.history_rows, self.history_page_lbl)
-    #--------------------------------------------------------------------------
     def build_history_ui(self):
         self.history_frame = tk.Frame(self.container, bg="#121212")
 
@@ -838,8 +880,6 @@ class FlukeApp:
         )
         header.pack(fill=tk.X)
 
-        #bottom items are packed first so the list gets whatever space is left
-        #(Newer / Back / Older share one row to fit the small screen; the arrows also flip pages)
         nav = tk.Frame(self.history_frame, bg="#121212")
         nav.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=4)
         self.make_button(nav, "< Newer", self.history_newer).pack(side=tk.LEFT)
@@ -852,12 +892,6 @@ class FlukeApp:
         self.history_rows = tk.Frame(self.history_frame, bg="#121212")
         self.history_rows.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
 
-    #--------------------------------------------------------------------------
-    # build_detail_ui
-    # builds the full-detail screen shown when a history row is tapped
-    # input: none
-    # output: none (creates self.detail_frame and self.detail_lbl)
-    #--------------------------------------------------------------------------
     def build_detail_ui(self):
         self.detail_frame = tk.Frame(self.container, bg="#121212")
 
@@ -869,7 +903,6 @@ class FlukeApp:
 
         self.make_button(self.detail_frame, "Back", self.back_to_history).pack(side=tk.BOTTOM, pady=4)
 
-        # Scrollable, because a full scan detail is taller than the small screen
         self.detail_canvas, detail_inner = self.make_scroll_area(self.detail_frame)
         self.detail_lbl = tk.Label(
             detail_inner, text="", font=("Courier", 12, "bold"),
@@ -877,10 +910,6 @@ class FlukeApp:
         )
         self.detail_lbl.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
 
-    #--------------------------------------------------------------------------
-    # build_wifi_ui
-    # the Wi-Fi scanner list: one button per nearby access point, strongest first
-    #--------------------------------------------------------------------------
     def build_wifi_ui(self):
         self.wifi_frame = tk.Frame(self.container, bg="#121212")
 
@@ -903,10 +932,6 @@ class FlukeApp:
 
         self.wifi_canvas, self.wifi_rows = self.make_scroll_area(self.wifi_frame)
 
-    #--------------------------------------------------------------------------
-    # build_ap_ui
-    # the info screen for one access point (shown when a row is tapped)
-    #--------------------------------------------------------------------------
     def build_ap_ui(self):
         self.ap_frame = tk.Frame(self.container, bg="#121212")
 
@@ -926,17 +951,10 @@ class FlukeApp:
         self.ap_lbl.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
 
     # --- EVENT HANDLERS ---
-    # Tkinter calls these automatically when the matching key/event happens. The "event"
-    # argument is required by Tkinter even when we don't need to look at it ourselves.
 
     def close_window(self, event):
         self.root.destroy()
 
-    #--------------------------------------------------------------------------
-    # exit_pressed
-    # Exit button: first tap asks "Sure?", a second tap within 3 seconds closes
-    # the app (the notafluke launcher then puts the terminal back on the screen)
-    #--------------------------------------------------------------------------
     def exit_pressed(self):
         if self.exit_armed:
             logger.info("exit button pressed")
@@ -958,10 +976,6 @@ class FlukeApp:
     def resize_scroll_content(self, event):
         self.scroll_canvas.itemconfig(self.canvas_window, width=event.width)
 
-    #--------------------------------------------------------------------------
-    # current_canvas
-    # which scrollable box is on screen right now (None if the page doesn't scroll)
-    #--------------------------------------------------------------------------
     def current_canvas(self):
         if self.current_view == "results":
             return self.scroll_canvas
@@ -973,11 +987,6 @@ class FlukeApp:
             return self.ap_canvas
         return None
 
-    #--------------------------------------------------------------------------
-    # scroll_by
-    # moves the page up (negative) or down (positive). On the History page
-    # it flips pages instead, since that list is shown a page at a time.
-    #--------------------------------------------------------------------------
     def scroll_by(self, steps):
         if self.current_view == "history":
             if steps < 0:
@@ -995,15 +1004,11 @@ class FlukeApp:
     def scroll_down(self, event):
         self.scroll_by(1)
 
-    #--------------------------------------------------------------------------
-    # arrow_pressed / arrow_released
-    # the on-screen arrows: scroll once, then keep going while held down
-    #--------------------------------------------------------------------------
     def arrow_pressed(self, arrow, direction):
         arrow.config(bg="#444444", relief=tk.SUNKEN)
         self.arrow_direction = direction
         if self.current_view == "history":
-            self.scroll_by(direction)      # one page per tap, no repeat
+            self.scroll_by(direction)
             return
         self.scroll_by(direction * 2)
         self.arrow_job = self.root.after(400, self.arrow_repeat)
@@ -1026,7 +1031,6 @@ class FlukeApp:
         canvas = self.current_canvas()
         if canvas is None:
             return
-        # small wobbles on the resistive screen are still a tap, not a drag
         if not self.drag_moved:
             if abs(event.y_root - self.drag_start_y) > 10:
                 self.drag_moved = True
@@ -1041,7 +1045,6 @@ class FlukeApp:
         self.scroll_by(5)
 
     def scroll_with_mouse_wheel(self, event):
-        # event.delta is positive when scrolling up and negative when scrolling down.
         if event.delta > 0:
             self.scroll_by(-1)
         else:
@@ -1049,12 +1052,6 @@ class FlukeApp:
 
     # --- UI STATE MANAGERS ---
 
-    #--------------------------------------------------------------------------
-    # hide_all_frames
-    # takes every screen off the display so one can be packed in its place
-    # input: none
-    # output: none
-    #--------------------------------------------------------------------------
     def hide_all_frames(self):
         self.scanner_frame.pack_forget()
         self.results_frame.pack_forget()
@@ -1063,11 +1060,6 @@ class FlukeApp:
         self.wifi_frame.pack_forget()
         self.ap_frame.pack_forget()
 
-    #--------------------------------------------------------------------------
-    # is_browsing
-    # True while History or Wi-Fi is open. The test keeps running in the
-    # background, but it won't yank you off those pages - Back takes you to it.
-    #--------------------------------------------------------------------------
     def is_browsing(self):
         return self.current_view in ("history", "detail", "wifi", "ap")
 
@@ -1094,8 +1086,17 @@ class FlukeApp:
         self.lbl_port.config(text=f"PORT:  {self.scan_results['switch_port']}")
         self.lbl_vlan.config(text=f"VLAN:  {self.scan_results['switch_vlan']}")
         self.lbl_voice.config(text=f"VOICE: {self.scan_results['switch_voice']}")
-
         self.lbl_poe.config(text=f"POE:   {self.scan_results['switch_poe']}")
+
+        # IPv4 & DHCP details
+        dhcp_status = self.scan_results['dhcp_server']
+        if self.scan_results['dhcp_time'] != "--":
+            dhcp_status += f" ({self.scan_results['dhcp_time']})"
+        self.lbl_my_ip.config(text=f"IP:      {self.scan_results['eth_ip']}")
+        self.lbl_gateway.config(text=f"GATEWAY: {self.scan_results['eth_gateway']}")
+        self.lbl_dhcp_srv.config(text=f"DHCP:    {dhcp_status}")
+        self.lbl_lease.config(text=f"LEASE:   {self.scan_results['dhcp_lease']}")
+        self.lbl_domain.config(text=f"DOMAIN:  {self.scan_results['eth_domain']}")
 
         sp_text = f"Down: {self.scan_results['speed_down']} | Up: {self.scan_results['speed_up']} | Ping: {self.scan_results['speed_ping']}"
         dn_text = f"Queries: {self.scan_results['dns_queries']} | Domain: {self.scan_results['dns_last_domain']}"
@@ -1112,12 +1113,6 @@ class FlukeApp:
         self.scroll_canvas.yview_moveto(0)
         self.current_view = "results"
 
-    #--------------------------------------------------------------------------
-    # open_history
-    # loads the saved scans fresh from disk and shows page 1 of the list
-    # input: none
-    # output: none
-    #--------------------------------------------------------------------------
     def open_history(self):
         if self.current_view == "scanner" or self.current_view == "results":
             self.return_view = self.current_view
@@ -1127,32 +1122,14 @@ class FlukeApp:
         self.render_history_page()
         self.show_history_frame()
 
-    #--------------------------------------------------------------------------
-    # show_history_frame
-    # swaps the display to the history list without reloading anything
-    # input: none
-    # output: none
-    #--------------------------------------------------------------------------
     def show_history_frame(self):
         self.hide_all_frames()
         self.history_frame.pack(expand=True, fill=tk.BOTH)
         self.current_view = "history"
 
-    #--------------------------------------------------------------------------
-    # close_history
-    # goes back to whichever screen History was opened from. Packs the frame
-    # directly instead of calling show_scanner_ui so a running speed test
-    # animation isn't stopped
-    # input: none
-    # output: none
-    #--------------------------------------------------------------------------
     def close_history(self):
         self.go_back_to_main()
 
-    #--------------------------------------------------------------------------
-    # go_back_to_main
-    # back to the scanner or results screen, whichever the test is on
-    #--------------------------------------------------------------------------
     def go_back_to_main(self):
         self.hide_all_frames()
         if self.return_view == "results":
@@ -1161,12 +1138,6 @@ class FlukeApp:
             self.scanner_frame.pack(expand=True, fill=tk.BOTH)
         self.current_view = self.return_view
 
-    #--------------------------------------------------------------------------
-    # render_history_page
-    # redraws the row buttons for the current page
-    # input: none
-    # output: none
-    #--------------------------------------------------------------------------
     def render_history_page(self):
         for child in self.history_rows.winfo_children():
             child.destroy()
@@ -1202,12 +1173,6 @@ class FlukeApp:
             self.history_page = self.history_page + 1
             self.render_history_page()
 
-    #--------------------------------------------------------------------------
-    # show_detail_ui
-    # shows every saved field of one scan
-    # input: record (dict from the scan log)
-    # output: none
-    #--------------------------------------------------------------------------
     def show_detail_ui(self, record):
         self.detail_lbl.config(text=format_record_detail(record))
         self.hide_all_frames()
@@ -1220,10 +1185,6 @@ class FlukeApp:
 
     # --- WI-FI SCANNER SCREENS ---
 
-    #--------------------------------------------------------------------------
-    # open_wifi
-    # shows the Wi-Fi list and starts a fresh scan
-    #--------------------------------------------------------------------------
     def open_wifi(self):
         if self.current_view == "scanner" or self.current_view == "results":
             self.return_view = self.current_view
@@ -1238,10 +1199,6 @@ class FlukeApp:
     def close_wifi(self):
         self.go_back_to_main()
 
-    #--------------------------------------------------------------------------
-    # start_wifi_scan
-    # scanning takes ~4 seconds, so it runs on its own thread (screen stays responsive)
-    #--------------------------------------------------------------------------
     def start_wifi_scan(self):
         if self.wifi_scanning:
             return
@@ -1258,10 +1215,6 @@ class FlukeApp:
             access_points = []
         self.root.after(0, self.show_wifi_results, access_points)
 
-    #--------------------------------------------------------------------------
-    # show_wifi_results
-    # one row per access point: signal (coloured), name, channel, security
-    #--------------------------------------------------------------------------
     def show_wifi_results(self, access_points):
         self.wifi_scanning = False
         self.wifi_scan_button.config(text="Scan", fg="#FFFFFF")
@@ -1281,7 +1234,7 @@ class FlukeApp:
         for ap in access_points:
             name = ap["ssid"]
             if ap["connected"]:
-                name = "*" + name     # * = the Pi's own wifi
+                name = "*" + name
             text = f"{ap['signal']:>4} {name[:16]:<16} ch{ap['channel']:<4}{ap['security']}"
             tk.Button(
                 self.wifi_rows, text=text, font=("Courier", 12, "bold"), anchor="w",
@@ -1290,11 +1243,6 @@ class FlukeApp:
                 command=lambda a=ap: self.show_ap_info(a)
             ).pack(fill=tk.X, padx=6, pady=1)
 
-    #--------------------------------------------------------------------------
-    # show_ap_info
-    # full info for one access point. Ignored if the finger was dragging the
-    # list (otherwise scrolling would open whatever row you started on)
-    #--------------------------------------------------------------------------
     def show_ap_info(self, ap):
         if self.drag_moved:
             return
@@ -1335,6 +1283,12 @@ class FlukeApp:
             "switch_vlan": "None / Untagged",
             "switch_voice": "None",
             "switch_proto": "--",
+            "eth_ip": "No IP",
+            "eth_gateway": "--",
+            "dhcp_server": "--",
+            "dhcp_lease": "--",
+            "eth_domain": "--",
+            "dhcp_time": "--",
             "speed_down": "Failed",
             "speed_up": "Failed",
             "speed_ping": "Failed",
@@ -1345,25 +1299,17 @@ class FlukeApp:
             "switch_poe": "Unknown (no CDP/LLDP)",
             "speed_rating": "--"
         }
-        self.cdp_poe = ""    # forget the last cable's PoE info
+        self.cdp_poe = ""
 
-    #--------------------------------------------------------------------------
-    # finish_scan
-    # stamps the finish time and saves the scan to the log. Called once per
-    # scan: with True when the results page is ready, with False when the
-    # cable was pulled part way through
-    # input: complete (True if every step ran, False if cut short)
-    # output: none
-    #--------------------------------------------------------------------------
     def finish_scan(self, complete):
         self.scan_results["finished_at"] = now_stamp()
         self.scan_results["complete"] = complete
         save_scan_record(dict(self.scan_results))
 
         if complete:
-            logger.info("scan complete: switch=%s port=%s down=%s",
+            logger.info("scan complete: switch=%s port=%s ip=%s down=%s",
                         self.scan_results["switch_name"], self.scan_results["switch_port"],
-                        self.scan_results["speed_down"])
+                        self.scan_results["eth_ip"], self.scan_results["speed_down"])
         else:
             logger.warning("scan cut short: cable removed before results")
 
@@ -1387,11 +1333,26 @@ class FlukeApp:
             time.sleep(1)
             seconds_left = seconds_left - 1
 
+    #--------------------------------------------------------------------------
+    # wait_for_dhcp
+    # waits up to max_wait seconds for NetworkManager to get an IPv4 address,
+    # timing how long the DHCP negotiation took
+    # output: elapsed seconds as text (e.g. "1.8s" or "timed out")
+    #--------------------------------------------------------------------------
+    def wait_for_dhcp(self, max_wait=15):
+        start = time.time()
+        while time.time() - start < max_wait:
+            if not self.is_cable_connected():
+                return "--"
+            if get_eth_ip() != "":
+                elapsed = time.time() - start
+                return f"{elapsed:.1f}s"
+            time.sleep(0.5)
+        return "timed out"
+
     # --- SWITCH TOPOLOGY (CDP/LLDP via lldpd) ---
 
     def query_lldpd(self):
-        # Ask the lldpd service (installed/started by install.sh) what it's heard on this port.
-        # "-f keyvalue" prints one line per fact, like:  lldp.eth0.chassis.name=SWITCH-01
         try:
             result = subprocess.run(
                 ["lldpctl", "-f", "keyvalue", INTERFACE],
@@ -1406,9 +1367,6 @@ class FlukeApp:
             return ""
 
     def get_lldp_value(self, kv_text, field_name):
-        # kv_text is many lines of "lldp.eth0.<field_name>=<value>". Find the one line that
-        # starts with our field name and return the value after the "=". If there's no such
-        # line, lldpd hasn't heard that fact, so return an empty string.
         prefix = "lldp." + INTERFACE + "." + field_name + "="
         for line in kv_text.splitlines():
             if line.startswith(prefix):
@@ -1424,7 +1382,6 @@ class FlukeApp:
             switch_name = "Unknown"
         self.scan_results["switch_name"] = switch_name
 
-        # Different switches put the port name in different fields; try each in turn.
         port = self.get_lldp_value(kv_text, "port.ifname")
         if port == "":
             port = self.get_lldp_value(kv_text, "port.descr")
@@ -1449,7 +1406,6 @@ class FlukeApp:
             protocol = "--"
         self.scan_results["switch_proto"] = protocol
 
-        # Voice VLAN (LLDP-MED / CDP appliance TLV): any line mentioning "voice" with a VLAN id.
         voice = "None"
         for line in kv_text.splitlines():
             if "voice" in line.lower() and "vid=" in line:
@@ -1461,13 +1417,6 @@ class FlukeApp:
 
         return True
 
-    #--------------------------------------------------------------------------
-    # get_poe_text
-    # what the switch announced about PoE on this port (802.3at power info in
-    # LLDP, or LLDP-MED). The Pi itself can't measure PoE voltage - that needs
-    # a PoE HAT or a PoE tester - so this is the switch's word for it.
-    # output: text like "Yes, class 4, 25500 mW" or "Not advertised"
-    #--------------------------------------------------------------------------
     def get_poe_text(self, kv_text):
         supported = self.get_lldp_value(kv_text, "port.power.supported")
         power_class = self.get_lldp_value(kv_text, "port.power.class")
@@ -1489,8 +1438,6 @@ class FlukeApp:
         return text
 
     def discover_switch_topology(self):
-        # Poll lldpd once a second instead of sniffing packets ourselves — lldpd already runs
-        # continuously in the background, so this usually returns data on the very first check.
         seconds_left = SWITCH_DISCOVERY_TIMEOUT
         while seconds_left >= 0:
             if not self.is_cable_connected():
@@ -1511,12 +1458,6 @@ class FlukeApp:
 
     # --- PACKET HANDLERS ---
 
-    #--------------------------------------------------------------------------
-    # test_dns
-    # 1) start the packet sniffer and WAIT until it is really listening
-    # 2) send a real DNS lookup out of the test port to the network's DNS server
-    # 3) keep sniffing for the rest of the 3 seconds to catch any other DNS traffic
-    #--------------------------------------------------------------------------
     def test_dns(self):
         sniffer_ready = threading.Event()
         sniffer = AsyncSniffer(
@@ -1528,7 +1469,7 @@ class FlukeApp:
 
         servers = get_dns_servers()
         if len(servers) == 0:
-            servers = ["1.1.1.1"]   # the network gave us none, try a public one
+            servers = ["1.1.1.1"]
         server = servers[0]
 
         worked, answer = dns_lookup(server, "google.com")
@@ -1538,11 +1479,6 @@ class FlukeApp:
         time.sleep(3)
         sniffer.stop()
 
-    #--------------------------------------------------------------------------
-    # on_cdp_packet
-    # called for every Cisco CDP announcement (about once a minute). A PoE port
-    # includes "Power Available" in milliwatts; a non-PoE port leaves it out.
-    #--------------------------------------------------------------------------
     def on_cdp_packet(self, packet):
         if packet.haslayer(CDPMsgPowerAvailable):
             values = packet[CDPMsgPowerAvailable].power_available_list
@@ -1553,7 +1489,6 @@ class FlukeApp:
         self.cdp_poe = "No (switch offers no power)"
 
     def parse_dns_packet(self, packet):
-        # count the questions (qr == 0); answers coming back are the same lookups
         if packet.haslayer(DNS) and packet.haslayer(DNSQR) and packet[DNS].qr == 0:
             qname = packet[DNSQR].qname.decode(errors="replace").rstrip(".")
             self.scan_results["dns_queries"] += 1
@@ -1594,7 +1529,26 @@ class FlukeApp:
             if self.cdp_poe != "" and self.scan_results["switch_poe"] in ("Not advertised", "Unknown (no CDP/LLDP)"):
                 self.scan_results["switch_poe"] = self.cdp_poe
 
-            # 3. DNS TEST (real lookup out of eth0 + 3s of sniffing)
+            # 3. IPV4 & DHCP ACQUISITION
+            self.root.after(
+                0, self.update_scanner, "TESTING NETWORK...", "#FFFF00",
+                "Mode: DHCP Acquisition", "--:--"
+            )
+            dhcp_elapsed = self.wait_for_dhcp(max_wait=15)
+            self.scan_results["dhcp_time"] = dhcp_elapsed
+
+            net_info = get_eth_network_info()
+            self.scan_results["eth_ip"] = net_info["ip"]
+            self.scan_results["eth_gateway"] = net_info["gateway"]
+            self.scan_results["dhcp_server"] = net_info["dhcp_server"]
+            self.scan_results["dhcp_lease"] = net_info["lease"]
+            self.scan_results["eth_domain"] = net_info["domain"]
+
+            if not self.is_cable_connected():
+                self.finish_scan(False)
+                continue
+
+            # 4. DNS TEST (real lookup out of eth0 + 3s of sniffing)
             self.root.after(0, self.update_scanner, "TESTING NETWORK...", "#FFFF00", "Mode: DNS Test", "00:03")
             self.sniffing = True
             timer_thread = threading.Thread(target=self.countdown_timer, args=(3,))
@@ -1608,7 +1562,7 @@ class FlukeApp:
                 self.finish_scan(False)
                 continue
 
-            # 4. BANDWIDTH TEST: Animated Loading Screen
+            # 5. BANDWIDTH TEST: Animated Loading Screen
             self.root.after(0, self.update_scanner, "TESTING NETWORK...", "#FFFF00", "Mode: Bandwidth Speed Test", "")
             self.root.after(0, self.start_loading_animation, "Connecting to closest server...")
 
@@ -1628,10 +1582,9 @@ class FlukeApp:
                 self.scan_results["speed_ping"] = f"{st.results.ping:.0f} ms"
                 self.scan_results["speed_rating"] = speed_rating(down_bps / 1_000_000)
             except Exception:
-                #the results page still says Failed, but now the log says why
                 logger.exception("speedtest failed")
 
-            # 5. DIAGNOSTIC RESULTS PAGE
+            # 6. DIAGNOSTIC RESULTS PAGE
             if not self.is_cable_connected():
                 self.finish_scan(False)
                 continue
@@ -1645,7 +1598,6 @@ class FlukeApp:
 
 
 if __name__ == "__main__":
-    # --history only reads the log, so it works without sudo and without a screen
     if "--history" in sys.argv:
         print_history()
         sys.exit(0)
