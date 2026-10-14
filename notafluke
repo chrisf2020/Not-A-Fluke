@@ -1,0 +1,122 @@
+#!/bin/bash
+# notafluke — the one command for Not-A-Fluke. Starts the touchscreen GUI (fluke-gui.py) on the
+# small SPI screen. No desktop / startx needed, and it works from an SSH session: it starts its
+# own X server on the small screen.
+#
+#   notafluke            start the GUI on the small screen (runs in the background)
+#   notafluke -f         start it in the foreground (Ctrl-C stops it)
+#   notafluke stop       close the GUI and put the terminal (CLI) back on the small screen
+#   notafluke term       put the terminal back on the small screen (if it's ever blank)
+#   notafluke calibrate  line up the touchscreen (tap 4 crosses)
+#   notafluke log        show the GUI's output (errors etc.)
+
+DIR="$(dirname "$(readlink -f "$0")")"
+LOG=/tmp/notafluke.log
+DISPLAY_NUM=:1
+# The touchscreen GUI
+GUI="$DIR/fluke-gui.py"
+
+# Needs root (raw packet sniffing + starting X). Re-run ourselves with sudo.
+[ "$(id -u)" = 0 ] || exec sudo "$(readlink -f "$0")" "$@"
+
+stop() { pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI" 2>/dev/null; }
+
+# Once the GUI is closed (Exit button, Esc, or "notafluke stop"), give the small screen back to
+# the terminal (CLI): wipe it, then move the text consoles tty1-6 onto it.
+closed_screen() {
+  TFT_NUM=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5 | tr -d fb)
+  [ -n "$TFT_NUM" ] || return
+  dd if=/dev/zero of=/dev/fb$TFT_NUM bs=64k status=none 2>/dev/null
+  # Map to the HDMI screen and back, which forces the console to redraw itself on the small screen.
+  for tty in 1 2 3 4 5 6; do con2fbmap $tty 0; con2fbmap $tty $TFT_NUM; done
+  chvt 1 2>/dev/null
+  # X leaves the console "blanked" when it quits; wake it up (and turn off console blanking) so the text shows.
+  TERM=linux setterm --blank poke </dev/tty1 >/dev/tty1 2>/dev/null
+  TERM=linux setterm --blank 0 --powerdown 0 </dev/tty1 >/dev/tty1 2>/dev/null
+}
+
+case "$1" in
+  stop) stop; sleep 1; closed_screen; echo "Not-A-Fluke stopped."; exit 0 ;;
+  term) closed_screen; echo "Small screen is the terminal again."; exit 0 ;;
+  log)  cat "$LOG"; exit 0 ;;
+  calibrate)
+    # Close the GUI and move the terminal off the small screen so the crosses can show,
+    # run the calibration, then give the screen back to the terminal.
+    stop; sleep 1
+    for tty in 1 2 3 4 5 6; do con2fbmap $tty 0; done
+    "$DIR/fluke-calibrate"
+    closed_screen
+    exit 0 ;;
+esac
+
+# Find the small screen: its framebuffer driver name starts with "fb_" (fb_ili9486).
+FB=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5)
+if [ -z "$FB" ]; then
+  echo "notafluke: small TFT screen not found (is dtoverlay=piscreen in /boot/firmware/config.txt?)" >&2
+  exit 1
+fi
+
+# Close any copy that's already running.
+stop
+sleep 0.5
+
+# X config for the TFT only (draws on the small screen, not the HDMI desktop).
+CONF_DIR=/run/notafluke
+mkdir -p "$CONF_DIR"
+cat > "$CONF_DIR/xorg.conf" <<EOF
+Section "ServerFlags"
+    Option "AutoAddGPU" "false"
+    Option "BlankTime"   "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime"     "0"
+EndSection
+Section "Device"
+    Identifier "TFT"
+    Driver     "fbdev"
+    Option     "fbdev" "/dev/$FB"
+EndSection
+Section "Screen"
+    Identifier "TFTScreen"
+    Device     "TFT"
+EndSection
+EOF
+# Touchscreen: evdev driver + the calibration saved by "notafluke calibrate" (raw defaults until then).
+CAL=$(grep -h '"Calibration"\|"SwapAxes"' /etc/X11/xorg.conf.d/99-calibration.conf 2>/dev/null)
+[ -n "$CAL" ] || CAL='    Option "Calibration" "0 4095 0 4095"
+    Option "SwapAxes" "0"'
+cat >> "$CONF_DIR/xorg.conf" <<EOF
+Section "InputClass"
+    Identifier   "notafluke touch"
+    MatchProduct "ADS7846 Touchscreen"
+    MatchDevicePath "/dev/input/event*"
+    Driver       "evdev"
+$CAL
+EndSection
+EOF
+
+# The session: no screen blanking, no mouse pointer, then the GUI (Esc or "notafluke stop" quits).
+cat > "$CONF_DIR/session" <<EOF
+#!/bin/sh
+xset s off -dpms 2>/dev/null
+# Tiny window manager so the GUI's fullscreen fills the whole small screen.
+matchbox-window-manager -use_titlebar no -use_cursor no &
+exec python3 "$GUI"
+EOF
+chmod +x "$CONF_DIR/session"
+
+# -sharevts -novtswitch: don't steal the console/desktop from the HDMI screen.
+CMD=(xinit "$CONF_DIR/session" -- /usr/bin/Xorg "$DISPLAY_NUM" -config "$CONF_DIR/xorg.conf"
+     vt8 -sharevts -novtswitch -nolisten tcp -nocursor
+     -logfile /tmp/notafluke-xorg.log)
+
+# Run the GUI; when it closes (Exit button / Esc), give the small screen back to the terminal.
+run() { "${CMD[@]}"; closed_screen; }
+
+if [ "$1" = "-f" ]; then
+  run; exit
+fi
+export -f run closed_screen
+export CMD_STR="$(printf '%q ' "${CMD[@]}")"
+setsid nohup bash -c 'eval "CMD=($CMD_STR)"; run' >"$LOG" 2>&1 < /dev/null &
+echo "Not-A-Fluke is running on the small screen.  Stop: notafluke stop   Log: notafluke log"
