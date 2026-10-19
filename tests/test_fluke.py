@@ -76,6 +76,12 @@ class SpeedTests(unittest.TestCase):
         self.assertEqual(ping["loss"], 25.0)
         self.assertIsNone(speed.parse_ping_output("100% packet loss"))
 
+    def test_ping_shows_lines(self):
+        lines = []
+        ping = speed.ping_burst("lo", "127.0.0.1", count=3, on_line=lines.append)
+        self.assertEqual(ping["loss"], 0.0)
+        self.assertEqual(sum("icmp_seq=" in line for line in lines), 3)
+
     def test_read_number(self):
         self.assertEqual(speed.read_number("290.0 Mbps"), 290.0)
         self.assertIsNone(speed.read_number("Failed"))
@@ -168,6 +174,9 @@ class ScreenTests(unittest.TestCase):
             app = FlukeApp(root, windowed=True, start_workers=False)
             app.scan_results = empty_scan_results(started=True)
             app.update_scanner("TESTING", "#FFFFFF", 2, "")
+            for n in range(7):
+                app.add_ping_line(f"64 bytes from 1.1.1.1: icmp_seq={n} ttl=57 time=11.{n} ms")
+            self.assertEqual(len(app.ping_lines), 5)
             app.open_history()
             app.show_results_ui()                       # finishing on another tab doesn't pull you back
             self.assertEqual(app.current_view, "history")

@@ -106,23 +106,35 @@ def parse_ping_output(text):
 
 
 # None if ping is missing or nothing replied
-def ping_burst(interface=INTERFACE, target=PING_TARGET, count=PING_COUNT):
+# on_line(text) gets each line as ping prints it, so the screen can show it live.
+# -O prints a line for every ping that got no answer too
+def ping_burst(interface=INTERFACE, target=PING_TARGET, count=PING_COUNT, on_line=None):
     try:
-        result = subprocess.run(
-            ["ping", "-n", "-I", interface, "-c", str(count), "-i", "0.2", "-W", "1", target],
-            capture_output=True, text=True, timeout=count + 10,
+        proc = subprocess.Popen(
+            ["ping", "-n", "-O", "-I", interface, "-c", str(count), "-i", "0.2", "-W", "1", target],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             env=dict(os.environ, LC_ALL="C")      # English output so the regex works
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
         logger.warning("ping burst could not run")
         return None
-    return parse_ping_output(result.stdout)
+    killer = threading.Timer(count + 10, proc.kill)    # don't hang if ping does
+    killer.start()
+    output = []
+    for line in proc.stdout:
+        output.append(line)
+        if on_line is not None and line.strip() != "":
+            on_line(line.rstrip())
+    proc.stdout.close()
+    proc.wait()
+    killer.cancel()
+    return parse_ping_output("".join(output))
 
 
 # never raises, if ping fails the results just stay Failed (shows N/A)
-def run_ping_test(results, interface=INTERFACE):
+def run_ping_test(results, interface=INTERFACE, on_line=None):
     try:
-        ping = ping_burst(interface)
+        ping = ping_burst(interface, on_line=on_line)
         if ping is None:
             logger.warning("no ping replies on %s - latency, jitter and loss left as N/A", interface)
             return

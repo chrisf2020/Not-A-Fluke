@@ -1,6 +1,7 @@
 # main window: top bar, tab bar (Cable / Wi-Fi / History), the cable test screens and the scan loop
 # history and wifi screens come from history.py and wifi.py as mixins
 
+import re
 import time
 import threading
 import tkinter as tk
@@ -290,6 +291,12 @@ class FlukeApp(HistoryScreens, WifiScreens):
                                             mode="indeterminate", length=320)
         self.progress_bar.pack(pady=4)
 
+        # what ping prints while the ping step runs, last few lines
+        self.ping_lines = []
+        self.ping_log = tk.Label(self.scanner_frame, text="", font=("DejaVu Sans Mono", 9), bg=BG, fg=MUTED,
+                                 justify=tk.LEFT, anchor="w")
+        self.ping_log.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=6)
+
     def build_results_ui(self):
         self.results_frame = tk.Frame(self.container, bg=BG)
         self.scroll_canvas, self.scroll_content = self.make_scroll_area(self.results_frame)
@@ -488,8 +495,17 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.loading_frame.pack_forget()
         self.timer_label.pack(pady=10)
 
+    # newest line goes at the bottom, older ones scroll off the top
+    def add_ping_line(self, line):
+        line = re.sub(r"^\d+ bytes from |, time \d+ms$", "", line)[:56]   # fit the small screen
+        self.ping_lines = (self.ping_lines + [line])[-5:]
+        self.ping_log.config(text="\n".join(self.ping_lines))
+
     # step = index in SCAN_STEPS that's running now (-1 = waiting, 4 = all done)
     def update_scanner(self, status, status_color, step, timer_text):
+        if step != 2:     # the ping output only shows during the ping step
+            self.ping_lines = []
+            self.ping_log.config(text="")
         self.status_label.config(text=status, fg=status_color)
         for k, label in enumerate(self.step_labels):
             if k < step:
@@ -613,7 +629,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
             # 3b. ~4s of pings for latency, jitter and loss
             self.root.after(0, self.update_scanner, testing, TEXT, 2, "")
-            run_ping_test(self.scan_results)
+            run_ping_test(self.scan_results, on_line=lambda line: self.root.after(0, self.add_ping_line, line))
             if not self.is_cable_connected():
                 self.finish_scan(False)
                 continue

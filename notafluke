@@ -5,12 +5,13 @@
 #   notafluke            start the GUI (-f = in the foreground, Ctrl-C stops it)
 #   notafluke stop       close the GUI, give the screen back to the terminal
 #   notafluke log        show the GUI's output
+#   notafluke view       watch / use the small screen from your computer (see CHEATSHEET.md)
 #   notafluke test       run the tests
 #   notafluke calibrate  calibrate the touchscreen
 #   notafluke update     git pull and restart the GUI if running
 #   notafluke try <br>   run a GitHub branch from its own copy in ~/fluke-try
 #   notafluke install    install packages, the notafluke command and start-on-boot
-#   notafluke autostart on|off   start the GUI on boot or not
+#   notafluke autostart on|off   start the GUI on boot or not (no on/off = show which)
 
 DIR="$(dirname "$(readlink -f "$0")")"
 SELF="$DIR/notafluke"
@@ -54,7 +55,7 @@ esac
 
 # anything else isn't a command, show the list instead of starting the GUI
 case "$1" in
-  ""|-f|boot|stop|calibrate|install|autostart|blank) ;;
+  ""|-f|boot|stop|calibrate|install|autostart|blank|view) ;;
   *) echo "notafluke: unknown command '$1'"; sed -n '/^#   /s/^# //p' "$SELF"; exit 1 ;;
 esac
 
@@ -78,7 +79,7 @@ FB=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/
 # packages come from apt, newer Pi OS / Debian block sudo pip install
 PACKAGES="python3 python3-tk python3-scapy speedtest-cli lldpd iw tcpdump network-manager iputils-ping iproute2 x11-xserver-utils"
 # extra packages for the small screen
-[ -n "$FB" ] && PACKAGES="$PACKAGES xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit matchbox-window-manager fbset"
+[ -n "$FB" ] && PACKAGES="$PACKAGES xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit matchbox-window-manager fbset x11vnc"
 
 # true if all packages are installed, lldpd is running and the command exists
 has_everything() {
@@ -123,9 +124,17 @@ UNIT
 # systemd service that runs "notafluke boot" when the Pi starts. The Exit button still
 # drops you to the terminal, it just won't come back until the next boot.
 autostart() {
-  if [ "$1" = "off" ]; then
-    systemctl disable notafluke.service 2>/dev/null; echo "Won't start on boot anymore."; return
-  fi
+  case "$1" in
+    off) systemctl disable --quiet notafluke.service 2>/dev/null
+         echo "Off: it won't start on boot anymore. (Still running now if it was, notafluke stop closes it.)"; return ;;
+    on) ;;
+    *) if systemctl is-enabled --quiet notafluke.service 2>/dev/null; then
+         echo "Autostart is ON (starts when the Pi boots). Turn off: notafluke autostart off"
+       else
+         echo "Autostart is OFF. Turn on: notafluke autostart on"
+       fi
+       return ;;
+  esac
   cat > /etc/systemd/system/notafluke.service <<UNIT
 [Unit]
 Description=Not-A-Fluke touchscreen GUI
@@ -139,7 +148,8 @@ Restart=no
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl daemon-reload && systemctl enable notafluke.service && echo "Starts on boot now (turn off: notafluke autostart off)."
+  systemctl daemon-reload && systemctl enable --quiet notafluke.service &&
+    echo "On: it'll start by itself the next time the Pi boots (sudo reboot to see it now)."
 }
 
 stop() { pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI_MATCH" 2>/dev/null; }
@@ -174,6 +184,15 @@ case "$1" in
     exit 0 ;;
   install) install_all relink || exit 1; echo "Installed. Start it with:  notafluke"; exit 0 ;;
   autostart) autostart "$2"; exit 0 ;;
+  # share the small screen over VNC. Only on localhost, so you reach it through an SSH tunnel:
+  #   ssh -t -L 5901:localhost:5901 admin@raspberrypi.local notafluke view
+  # then point a VNC viewer at localhost:5901. Ctrl-C here stops sharing (the GUI keeps running)
+  view)
+    [ -n "$FB" ] || { echo "No small screen here, nothing to share." >&2; exit 1; }
+    has_everything || install_all || exit 1
+    pgrep -f "$GUI_MATCH" >/dev/null || { "$SELF"; sleep 3; }
+    echo "Sharing the small screen on localhost:5901. Open your VNC viewer now. Ctrl-C to stop."
+    exec x11vnc -display "$DISPLAY_NUM" -localhost -rfbport 5901 -shared -forever -nopw -quiet ;;
   boot) BOOTING=1; set -- -f ;;   # from the boot service: run in the foreground
 esac
 
