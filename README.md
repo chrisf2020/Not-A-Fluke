@@ -1,47 +1,67 @@
 # Not-A-Fluke
 
-Not-A-Fluke is a standalone, touchscreen-friendly network diagnostic tool for Raspberry Pi and Debian-based Linux devices. Once connected to an Ethernet drop, it detects physical carrier state, extracts switch topology via CDP/LLDP, tests active DNS lookup handling, and runs an internet bandwidth benchmark.
+A touchscreen network tester for the Raspberry Pi. Plug it into an Ethernet drop and it shows the switch, port, VLAN and PoE (from CDP/LLDP), checks DNS, measures latency, jitter and packet loss, and runs a speed test with a graph. The Wi-Fi tab scans nearby access points and can run the speed test over Wi-Fi too.
 
----
+Everyday how-to, testing other versions and getting new code on the Pi: see [CHEATSHEET.md](CHEATSHEET.md).
 
-# How to Run
+## Commands
 
 | Command | What it does |
 |---|---|
-| `notafluke` | start the GUI on the small screen |
-| `notafluke stop` | close it and put the terminal back on the small screen |
-| `notafluke term` | put the terminal back on the small screen (if it's blank) |
-| `notafluke calibrate` | line up the touchscreen |
-| `notafluke log` | show the GUI's output / errors |
-| `startx` | the Raspberry Pi desktop on the small screen (log out to get back to the CLI) |
+| `notafluke` | start the GUI (small screen on the Pi, 480x320 window on a VM) |
+| `notafluke -f` | same, but in the foreground (Ctrl-C to stop) |
+| `notafluke stop` | close it and give the small screen back to the terminal |
+| `notafluke calibrate` | calibrate the touchscreen |
+| `notafluke log` | show the GUI's output and errors |
+| `notafluke test` | run the tests (no sudo, cable or screen needed) |
+| `notafluke update` | pull the latest code for this branch and restart |
+| `notafluke try <branch>` | run a GitHub branch from its own copy in `~/fluke-try` |
+| `notafluke install` | install everything (first time on a new Pi or VM) |
+| `notafluke autostart on/off` | start the GUI when the Pi boots, or don't |
 
-Files: `fluke-gui.py` (the GUI), `notafluke` (the launcher), `fluke-calibrate` (touchscreen calibration).
+Don't run the Python file with `sudo python3 ...`. Use `notafluke`, it sorts out sudo and the display. Running Python directly over SSH gives the `no display name and no $DISPLAY environment variable` error.
 
----
+To test someone's branch, use `notafluke try <branch>` instead of switching branches. It runs a separate copy, so your folder and any unsaved changes stay as they are. `notafluke try` on its own lists the branches and `notafluke try clean` deletes the copies.
 
-## Hardware & System Requirements
+## Files
 
-- **Operating System:** Raspberry Pi OS (Debian 11 Bullseye or Debian 12 Bookworm recommended)
-- **Architecture:** `armhf`, `arm64`, or `x86_64`
-- **Display:** Any display supported by X11 / Wayland (defaults to fullscreen resolution)
-- **Network Interface:** Physical RJ-45 port (defaults to `eth0`)
+| File | What's in it |
+|---|---|
+| `notafluke` | the launcher |
+| `fluke-calibrate` | touchscreen calibration |
+| `fluke/main.py` | starts the app |
+| `fluke/app.py` | main window, scan and results screens |
+| `fluke/wifi.py` | Wi-Fi scanner, AP info, Wi-Fi speed test |
+| `fluke/history.py` | scan log and History screen |
+| `fluke/switch.py` | CDP/LLDP (via lldpd) and PoE |
+| `fluke/dns.py` | DNS test |
+| `fluke/speed.py` | speed test, ping stats, quality score |
+| `fluke/graph.py` | the speed graph |
+| `fluke/config.py` | version, ports, log paths, colours |
+| `tests/` | tests (`notafluke test`) |
 
----
-
-## 1. System Package Dependencies
-
-Not-A-Fluke requires several OS-level packages, the Tk GUI toolkit bindings, packet capture headers, and the `lldpd` daemon to capture switch advertisements.
-
-Run the following command to install all system dependencies:
+## Install
 
 ```bash
-sudo apt update
-sudo apt install -y \
-    python3 \
-    python3-pip \
-    python3-tk \
-    libpcap-dev \
-    scapy \
-sudo pip install speedtest-cli
+git clone git@github.com:timsmithh23/pi-fluke.git
+cd pi-fluke
+./notafluke install
+```
 
-    lldpd
+You can also just run `notafluke` and it will install anything missing on the first run. Packages come from apt, not pip, since newer Pi OS and Debian block `sudo pip install`.
+
+On the Pi, `install` also makes it start on boot. Hit Exit to get to the terminal, and `notafluke autostart off` if you don't want it on boot.
+
+## Testing on a VM
+
+- `notafluke` opens a 480x320 window (same size as the Pi screen) on the VM desktop.
+- Run it from a terminal on the VM's desktop, not over plain SSH.
+- It picks the first wired port it finds. To pick one yourself: `NOTAFLUKE_ETH=enp0s3 notafluke`
+- Most VMs have no Wi-Fi adapter, so the Wi-Fi tab will just say so.
+
+## Requirements
+
+- Raspberry Pi OS or Debian 12 (Bookworm) / 13 (Trixie)
+- `armhf`, `arm64` or `x86_64`
+- 3.5" SPI touchscreen (`dtoverlay=piscreen` or `tft35a`), or any desktop on a VM
+- An Ethernet port (`eth0` by default)

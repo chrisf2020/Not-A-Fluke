@@ -1,66 +1,206 @@
 #!/bin/bash
-# notafluke — the one command for Not-A-Fluke. Starts the touchscreen GUI (fluke-gui.py) on the
-# small SPI screen. No desktop / startx needed, and it works from an SSH session: it starts its
-# own X server on the small screen.
+# notafluke: starts Not-A-Fluke. On the Pi it runs the GUI on the small screen with its own X
+# server (works over SSH). With no small screen it opens a 480x320 window on the desktop.
 #
-#   notafluke            start the GUI on the small screen (runs in the background)
-#   notafluke -f         start it in the foreground (Ctrl-C stops it)
-#   notafluke stop       close the GUI and put the terminal (CLI) back on the small screen
-#   notafluke term       put the terminal back on the small screen (if it's ever blank)
-#   notafluke calibrate  line up the touchscreen (tap 4 crosses)
-#   notafluke log        show the GUI's output (errors etc.)
+#   notafluke            start the GUI (-f = in the foreground, Ctrl-C stops it)
+#   notafluke stop       close the GUI, give the screen back to the terminal
+#   notafluke log        show the GUI's output
+#   notafluke test       run the tests
+#   notafluke calibrate  calibrate the touchscreen
+#   notafluke update     git pull and restart the GUI if running
+#   notafluke try <br>   run a GitHub branch from its own copy in ~/fluke-try
+#   notafluke install    install packages, the notafluke command and start-on-boot
+#   notafluke autostart on|off   start the GUI on boot or not
 
 DIR="$(dirname "$(readlink -f "$0")")"
+SELF="$DIR/notafluke"
 LOG=/tmp/notafluke.log
 DISPLAY_NUM=:1
-# The touchscreen GUI
-GUI="$DIR/fluke-gui.py"
+GUI_MATCH="^python3 -m fluke( |$)"   # the running GUI (^ so it only matches the GUI itself)
 
-# Needs root (raw packet sniffing + starting X). Re-run ourselves with sudo.
-[ "$(id -u)" = 0 ] || exec sudo "$(readlink -f "$0")" "$@"
+# commands that don't need root
+case "$1" in
+  test)    cd "$DIR" && exec python3 -m unittest discover -s tests -v ;;
+  log)     cat "$LOG"; exit 0 ;;
+  update)
+    # run as the user so git files aren't owned by root
+    [ "$(id -u)" = 0 ] && [ -n "$SUDO_USER" ] && exec sudo -u "$SUDO_USER" "$SELF" update
+    git -C "$DIR" pull --ff-only || exit 1
+    if pgrep -f "$GUI_MATCH" >/dev/null; then "$SELF" stop; "$SELF"; fi
+    exit 0 ;;
+  try)
+    # each branch gets its own worktree in ~/fluke-try/<branch>, this folder isn't touched
+    [ "$(id -u)" = 0 ] && [ -n "$SUDO_USER" ] && exec sudo -u "$SUDO_USER" "$SELF" "$@"
+    TRY_DIR="$HOME/fluke-try"
+    git -C "$DIR" fetch -q --prune origin || { echo "Couldn't reach GitHub." >&2; exit 1; }
+    if [ -z "$2" ]; then
+      echo "Branches on GitHub:"; git -C "$DIR" branch -r --format='  %(refname:lstrip=3)' | grep -v '^  HEAD$'
+      echo "Try one:  notafluke try <branch>      Delete the copies:  notafluke try clean"; exit 0
+    fi
+    if [ "$2" = "clean" ]; then
+      for copy in "$TRY_DIR"/*/; do [ -d "$copy" ] && git -C "$DIR" worktree remove --force "$copy"; done
+      git -C "$DIR" worktree prune; echo "Removed the test copies in $TRY_DIR"; exit 0
+    fi
+    BRANCH="$2"; COPY="$TRY_DIR/${BRANCH//\//-}"
+    git -C "$DIR" rev-parse -q --verify "origin/$BRANCH" >/dev/null || { echo "No branch '$BRANCH' on GitHub." >&2; exit 1; }
+    if [ -d "$COPY" ]; then
+      git -C "$COPY" checkout -q --detach "origin/$BRANCH" || { echo "Couldn't update $COPY (edited files in it?)" >&2; exit 1; }
+    else
+      mkdir -p "$TRY_DIR"; git -C "$DIR" worktree add -q --detach "$COPY" "origin/$BRANCH" || exit 1
+    fi
+    echo "Running $BRANCH ($(git -C "$COPY" log -1 --format='%h %s')) from $COPY"
+    exec "$COPY/notafluke" "${@:3}" ;;
+esac
 
-stop() { pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI" 2>/dev/null; }
+# anything else isn't a command, show the list instead of starting the GUI
+case "$1" in
+  ""|-f|boot|stop|calibrate|install|autostart|blank) ;;
+  *) echo "notafluke: unknown command '$1'"; sed -n '/^#   /s/^# //p' "$SELF"; exit 1 ;;
+esac
 
-# Once the GUI is closed (Exit button, Esc, or "notafluke stop"), give the small screen back to
-# the terminal (CLI): wipe it, then move the text consoles tty1-6 onto it.
+# needs root (packet sniffing, X). Re-run with sudo and keep DISPLAY, which sudo drops
+if [ "$(id -u)" != 0 ]; then
+  if [ -n "$DISPLAY" ]; then
+    xhost +SI:localuser:root >/dev/null 2>&1   # let root draw on this desktop
+    exec sudo env DISPLAY="$DISPLAY" XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}" "$SELF" "$@"
+  fi
+  exec sudo "$SELF" "$@"
+fi
+
+# at boot the screen driver can show up a few seconds late, so wait for it
+if [ "$1" = "boot" ]; then
+  for i in $(seq 30); do grep -qs '^fb_' /sys/class/graphics/fb*/name && break; sleep 1; done
+fi
+
+# find the small screen (framebuffer name starts with fb_)
+FB=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5)
+
+# packages come from apt, newer Pi OS / Debian block sudo pip install
+PACKAGES="python3 python3-tk python3-scapy speedtest-cli lldpd iw tcpdump network-manager iputils-ping iproute2 x11-xserver-utils"
+# extra packages for the small screen
+[ -n "$FB" ] && PACKAGES="$PACKAGES xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit matchbox-window-manager fbset"
+
+# true if all packages are installed, lldpd is running and the command exists
+has_everything() {
+  for package in $PACKAGES; do
+    dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q "ok installed" || return 1
+  done
+  systemctl is-active --quiet lldpd && [ -e /usr/local/bin/notafluke ]
+}
+
+install_all() {
+  apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q $PACKAGES || return 1
+  systemctl enable --now lldpd                      # CDP/LLDP
+  # only "install" replaces an existing link, so a try copy never takes over the command
+  if [ "$1" = "relink" ] || [ ! -e /usr/local/bin/notafluke ]; then
+    ln -sf "$SELF" /usr/local/bin/notafluke
+    ln -sf "$DIR/fluke-calibrate" /usr/local/bin/fluke-calibrate
+  fi
+  # start on boot and go black on shutdown, only on the Pi (a VM has no small screen)
+  if [ -n "$FB" ] && [ "$1" = "relink" ]; then autostart on; blank_on_shutdown; fi
+  return 0
+}
+
+# runs "notafluke blank" when the Pi shuts down. Before= makes it stop after the GUI does
+blank_on_shutdown() {
+  cat > /etc/systemd/system/notafluke-blank.service <<UNIT
+[Unit]
+Description=Black out the small screen at shutdown
+Before=notafluke.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/bin/notafluke blank
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload && systemctl enable --now notafluke-blank.service
+}
+
+# systemd service that runs "notafluke boot" when the Pi starts. The Exit button still
+# drops you to the terminal, it just won't come back until the next boot.
+autostart() {
+  if [ "$1" = "off" ]; then
+    systemctl disable notafluke.service 2>/dev/null; echo "Won't start on boot anymore."; return
+  fi
+  cat > /etc/systemd/system/notafluke.service <<UNIT
+[Unit]
+Description=Not-A-Fluke touchscreen GUI
+After=systemd-user-sessions.service lldpd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/notafluke boot
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload && systemctl enable notafluke.service && echo "Starts on boot now (turn off: notafluke autostart off)."
+}
+
+stop() { pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI_MATCH" 2>/dev/null; }
+
+# after the GUI closes, clear the small screen and move tty1-6 back onto it
 closed_screen() {
   TFT_NUM=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5 | tr -d fb)
   [ -n "$TFT_NUM" ] || return
   dd if=/dev/zero of=/dev/fb$TFT_NUM bs=64k status=none 2>/dev/null
-  # Map to the HDMI screen and back, which forces the console to redraw itself on the small screen.
+  # map to HDMI and back to force a redraw
   for tty in 1 2 3 4 5 6; do con2fbmap $tty 0; con2fbmap $tty $TFT_NUM; done
   chvt 1 2>/dev/null
-  # X leaves the console "blanked" when it quits; wake it up (and turn off console blanking) so the text shows.
+  # X leaves the console blanked, wake it up and turn blanking off
   TERM=linux setterm --blank poke </dev/tty1 >/dev/tty1 2>/dev/null
   TERM=linux setterm --blank 0 --powerdown 0 </dev/tty1 >/dev/tty1 2>/dev/null
 }
 
 case "$1" in
   stop) stop; sleep 1; closed_screen; echo "Not-A-Fluke stopped."; exit 0 ;;
-  term) closed_screen; echo "Small screen is the terminal again."; exit 0 ;;
-  log)  cat "$LOG"; exit 0 ;;
+  # from the shutdown service: stop the console drawing on the small screen and paint it black,
+  # so it's black instead of white once the Pi is off
+  blank)
+    for con in /sys/class/vtconsole/vtcon*/; do grep -q "frame buffer" "$con/name" && echo 0 > "$con/bind"; done
+    [ -n "$FB" ] && dd if=/dev/zero of=/dev/$FB bs=64k status=none 2>/dev/null
+    exit 0 ;;
   calibrate)
-    # Close the GUI and move the terminal off the small screen so the crosses can show,
-    # run the calibration, then give the screen back to the terminal.
+    # move the terminal off the screen, calibrate, then put it back
     stop; sleep 1
     for tty in 1 2 3 4 5 6; do con2fbmap $tty 0; done
     "$DIR/fluke-calibrate"
     closed_screen
     exit 0 ;;
+  install) install_all relink || exit 1; echo "Installed. Start it with:  notafluke"; exit 0 ;;
+  autostart) autostart "$2"; exit 0 ;;
+  boot) BOOTING=1; set -- -f ;;   # from the boot service: run in the foreground
 esac
 
-# Find the small screen: its framebuffer driver name starts with "fb_" (fb_ili9486).
-FB=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5)
-if [ -z "$FB" ]; then
-  echo "notafluke: small TFT screen not found (is dtoverlay=piscreen in /boot/firmware/config.txt?)" >&2
-  exit 1
-fi
+# install anything missing first
+[ -n "$BOOTING" ] || has_everything || { echo "Installing what Not-A-Fluke needs (one time)..."; install_all || exit 1; }
 
-# Close any copy that's already running.
+# stop any copy already running
 stop
 sleep 0.5
 
-# X config for the TFT only (draws on the small screen, not the HDMI desktop).
+# no small screen (VM / desktop): open a window instead
+if [ -z "$FB" ]; then
+  if [ -z "$DISPLAY" ]; then
+    echo "notafluke: no small TFT screen and no desktop to open a window on." >&2
+    echo "  On a VM: run it from a terminal on the VM's desktop (not plain SSH)." >&2
+    echo "  On the Pi: is dtoverlay=piscreen (or tft35a) in /boot/firmware/config.txt?" >&2
+    exit 1
+  fi
+  cd "$DIR"
+  if [ "$1" = "-f" ]; then exec python3 -m fluke --windowed; fi
+  setsid nohup python3 -m fluke --windowed >"$LOG" 2>&1 < /dev/null &
+  echo "Not-A-Fluke is running in a window.  Stop: notafluke stop   Log: notafluke log"
+  exit 0
+fi
+
+# small screen
+# X config that only draws on the TFT, not HDMI
 CONF_DIR=/run/notafluke
 mkdir -p "$CONF_DIR"
 cat > "$CONF_DIR/xorg.conf" <<EOF
@@ -81,7 +221,7 @@ Section "Screen"
     Device     "TFT"
 EndSection
 EOF
-# Touchscreen: evdev driver + the calibration saved by "notafluke calibrate" (raw defaults until then).
+# touchscreen with saved calibration, or raw defaults
 CAL=$(grep -h '"Calibration"\|"SwapAxes"' /etc/X11/xorg.conf.d/99-calibration.conf 2>/dev/null)
 [ -n "$CAL" ] || CAL='    Option "Calibration" "0 4095 0 4095"
     Option "SwapAxes" "0"'
@@ -95,22 +235,22 @@ $CAL
 EndSection
 EOF
 
-# The session: no screen blanking, no mouse pointer, then the GUI (Esc or "notafluke stop" quits).
+# X session: no blanking, no cursor, then the GUI
 cat > "$CONF_DIR/session" <<EOF
 #!/bin/sh
 xset s off -dpms 2>/dev/null
 # Tiny window manager so the GUI's fullscreen fills the whole small screen.
 matchbox-window-manager -use_titlebar no -use_cursor no &
-exec python3 "$GUI"
+cd "$DIR" && exec python3 -m fluke
 EOF
 chmod +x "$CONF_DIR/session"
 
-# -sharevts -novtswitch: don't steal the console/desktop from the HDMI screen.
+# -sharevts -novtswitch so it doesn't take over the HDMI console
 CMD=(xinit "$CONF_DIR/session" -- /usr/bin/Xorg "$DISPLAY_NUM" -config "$CONF_DIR/xorg.conf"
      vt8 -sharevts -novtswitch -nolisten tcp -nocursor
      -logfile /tmp/notafluke-xorg.log)
 
-# Run the GUI; when it closes (Exit button / Esc), give the small screen back to the terminal.
+# run the GUI, then give the screen back to the terminal
 run() { "${CMD[@]}"; closed_screen; }
 
 if [ "$1" = "-f" ]; then
