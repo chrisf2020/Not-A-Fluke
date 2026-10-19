@@ -5,11 +5,9 @@
 #   notafluke            start the GUI (-f = in the foreground, Ctrl-C stops it)
 #   notafluke stop       close the GUI, give the screen back to the terminal
 #   notafluke log        show the GUI's output
-#   notafluke view       watch / use the small screen from your computer (see CHEATSHEET.md)
 #   notafluke test       run the tests
 #   notafluke calibrate  calibrate the touchscreen
 #   notafluke update     git pull and restart the GUI if running
-#   notafluke try <br>   run a GitHub branch from its own copy in ~/fluke-try
 #   notafluke install    install packages, the notafluke command and start-on-boot
 #   notafluke autostart on|off   start the GUI on boot or not (no on/off = show which)
 
@@ -55,7 +53,7 @@ esac
 
 # anything else isn't a command, show the list instead of starting the GUI
 case "$1" in
-  ""|-f|boot|stop|calibrate|install|autostart|blank|view) ;;
+  ""|-f|boot|stop|calibrate|install|autostart|blank|view|window) ;;
   *) echo "notafluke: unknown command '$1'"; sed -n '/^#   /s/^# //p' "$SELF"; exit 1 ;;
 esac
 
@@ -199,12 +197,20 @@ esac
 # install anything missing first
 [ -n "$BOOTING" ] || has_everything || { echo "Installing what Not-A-Fluke needs (one time)..."; install_all || exit 1; }
 
+# nowhere to show a window? say so before closing the copy that's running
+if [ "$1" = "window" ] && [ -z "$DISPLAY" ]; then
+  echo "notafluke: nowhere to open the window. Connect with  ssh -X admin@raspberrypi.local" >&2
+  echo "  (or MobaXterm on Windows), then run  notafluke window  again." >&2
+  exit 1
+fi
+
 # stop any copy already running
 stop
 sleep 0.5
 
-# no small screen (VM / desktop): open a window instead
-if [ -z "$FB" ]; then
+# no small screen (VM / desktop), or "window": open a window on $DISPLAY instead.
+# over "ssh -X" that window shows up on your own computer
+if [ -z "$FB" ] || [ "$1" = "window" ]; then
   if [ -z "$DISPLAY" ]; then
     echo "notafluke: no small TFT screen and no desktop to open a window on." >&2
     echo "  On a VM: run it from a terminal on the VM's desktop (not plain SSH)." >&2
@@ -212,7 +218,9 @@ if [ -z "$FB" ]; then
     exit 1
   fi
   cd "$DIR"
-  if [ "$1" = "-f" ]; then exec python3 -m fluke --windowed; fi
+  # the small screen goes back to the terminal while the GUI is on your computer
+  [ "$1" = "window" ] && [ -n "$FB" ] && closed_screen
+  if [ "$1" = "-f" ] || [ "$1" = "window" ]; then exec python3 -m fluke --windowed; fi
   setsid nohup python3 -m fluke --windowed >"$LOG" 2>&1 < /dev/null &
   echo "Not-A-Fluke is running in a window.  Stop: notafluke stop   Log: notafluke log"
   exit 0

@@ -2,8 +2,6 @@
 
 A touchscreen network tester for the Raspberry Pi. Plug it into an Ethernet drop and it shows the switch, port, VLAN and PoE (from CDP/LLDP), checks DNS, measures latency, jitter and packet loss, and runs a speed test with a graph. The Wi-Fi tab scans nearby access points and can run the speed test over Wi-Fi too.
 
-Everyday how-to, testing other versions and getting new code on the Pi: see [CHEATSHEET.md](CHEATSHEET.md).
-
 ## Commands
 
 | Command | What it does |
@@ -12,17 +10,13 @@ Everyday how-to, testing other versions and getting new code on the Pi: see [CHE
 | `notafluke -f` | same, but in the foreground (Ctrl-C to stop) |
 | `notafluke stop` | close it and give the small screen back to the terminal |
 | `notafluke calibrate` | calibrate the touchscreen |
-| `notafluke view` | see and use the small screen from your computer (VNC, see the cheat sheet) |
 | `notafluke log` | show the GUI's output and errors |
 | `notafluke test` | run the tests (no sudo, cable or screen needed) |
 | `notafluke update` | pull the latest code for this branch and restart |
-| `notafluke try <branch>` | run a GitHub branch from its own copy in `~/fluke-try` |
 | `notafluke install` | install everything (first time on a new Pi or VM) |
 | `notafluke autostart on/off` | start the GUI when the Pi boots, or don't |
 
 Don't run the Python file with `sudo python3 ...`. Use `notafluke`, it sorts out sudo and the display. Running Python directly over SSH gives the `no display name and no $DISPLAY environment variable` error.
-
-To test someone's branch, use `notafluke try <branch>` instead of switching branches. It runs a separate copy, so your folder and any unsaved changes stay as they are. `notafluke try` on its own lists the branches and `notafluke try clean` deletes the copies.
 
 ## Files
 
