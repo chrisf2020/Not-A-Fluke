@@ -11,7 +11,6 @@ from .config import (VERSION, INTERFACE, WIFI_INTERFACE, CARRIER_PATH, SWITCH_DI
                      BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger)
 from .history import HistoryScreens, save_scan_record, now_stamp, is_clock_synced, format_stamp
 from .wifi import WifiScreens
-from .graph import MetricsGraph
 from .speed import get_ip, link_speed, read_number, run_ping_test, run_bandwidth_test
 from .switch import query_lldpd, parse_switch_topology, start_cdp_listener
 
@@ -109,7 +108,6 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.exit_armed = False
         self.rescan_requested = False
         self.scan_results = empty_scan_results()
-        self.speed_curves = {"down": [], "up": []}   # samples for the speed graph
 
         # if the finger moved enough it's a drag, so don't also press the button under it
         self.drag_start_y = 0
@@ -336,9 +334,15 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_dns_seen = self.make_row(dns, "Lookups")
         tk.Frame(dns, bg=CARD_BG, height=6).pack()
 
+        # just the numbers here, the graph lives on the Wi-Fi tab
         speed = self.make_card(self.scroll_content, "Speed")
-        self.metrics_graph = MetricsGraph(speed, INTERFACE)
-        self.metrics_graph.canvas.pack(fill=tk.X, padx=4, pady=4)
+        self.res_down = self.make_row(speed, "Download")
+        self.res_up = self.make_row(speed, "Upload")
+        self.res_latency = self.make_row(speed, "Ping")
+        self.res_jitter = self.make_row(speed, "Jitter")
+        self.res_loss = self.make_row(speed, "Packet loss")
+        self.res_rating = self.make_row(speed, "Rating")
+        tk.Frame(speed, bg=CARD_BG, height=6).pack()
 
         tk.Label(self.scroll_content, text="Drag or use the arrows to scroll", font=("Helvetica", 9),
                  bg=BG, fg=MUTED, pady=8).pack(fill=tk.X)
@@ -474,7 +478,12 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_dns_server.config(text=results["dns_server"])
         self.res_dns_time.config(text=results["dns_time"])
         self.res_dns_seen.config(text=f"{results['dns_queries']}  (last: {results['dns_last_domain']})")
-        self.metrics_graph.show(results, self.speed_curves)
+        self.res_down.config(text=results["speed_down"])
+        self.res_up.config(text=results["speed_up"])
+        self.res_latency.config(text=results["ping_latency"])
+        self.res_jitter.config(text=results["ping_jitter"])
+        self.res_loss.config(text=results["ping_loss"])
+        self.res_rating.config(text=results["speed_rating"])
 
         self.cable_view = "results"
         if self.current_tab() == "cable":
@@ -592,7 +601,6 @@ class FlukeApp(HistoryScreens, WifiScreens):
             self.scan_results = empty_scan_results(started=True)
             self.scan_results["link_speed"] = link_speed()
             self.cdp_poe = ""    # forget the last cable's PoE
-            self.speed_curves = {"down": [], "up": []}
             logger.info("cable connected, scan started (clock synced: %s)", self.scan_results["clock_synced"])
 
             # 2. find the switch (up to SWITCH_DISCOVERY_TIMEOUT)
@@ -637,7 +645,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
             # 4. speed test with the loading bar
             self.root.after(0, self.update_scanner, testing, TEXT, 3, "")
             self.root.after(0, self.start_loading_animation, "Connecting to closest server...")
-            self.speed_curves = run_bandwidth_test(
+            run_bandwidth_test(
                 self.scan_results, INTERFACE,
                 on_status=lambda text: self.root.after(0, self.set_loading_message, text)
             )
