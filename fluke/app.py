@@ -11,6 +11,7 @@ from .config import (VERSION, INTERFACE, WIFI_INTERFACE, CARRIER_PATH, SWITCH_DI
                      BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger)
 from .history import HistoryScreens, save_scan_record, now_stamp, is_clock_synced, format_stamp
 from .wifi import WifiScreens
+from .graph import MetricsGraph
 from .speed import get_ip, link_speed, read_number, run_ping_test, run_bandwidth_test
 from .switch import query_lldpd, parse_switch_topology, start_cdp_listener
 
@@ -21,7 +22,7 @@ WINDOW_SIZE = "480x320"
 SCAN_STEPS = ["Switch", "DNS", "Ping", "Speed"]
 
 # which tab each screen belongs to
-VIEW_TAB = {"scanner": "cable", "results": "cable", "wifi": "wifi", "ap": "wifi",
+VIEW_TAB = {"scanner": "cable", "results": "cable", "cable_speed": "cable", "wifi": "wifi", "ap": "wifi",
             "wifi_speed": "wifi", "history": "history", "detail": "history"}
 
 
@@ -108,6 +109,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.exit_armed = False
         self.rescan_requested = False
         self.scan_results = empty_scan_results()
+        self.speed_curves = {"down": [], "up": []}   # samples for the speed graph
 
         # if the finger moved enough it's a drag, so don't also press the button under it
         self.drag_start_y = 0
@@ -170,9 +172,10 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.build_wifi_ui()
         self.build_ap_ui()
         self.build_wifi_speed_ui()
-        self.frames = [self.scanner_frame, self.results_frame, self.history_frame, self.detail_frame,
-                       self.wifi_frame, self.ap_frame, self.wifi_speed_frame]
-        self.scroll_canvases = {"results": self.scroll_canvas, "detail": self.detail_canvas,
+        self.frames = [self.scanner_frame, self.results_frame, self.cable_speed_frame, self.history_frame,
+                       self.detail_frame, self.wifi_frame, self.ap_frame, self.wifi_speed_frame]
+        self.scroll_canvases = {"results": self.scroll_canvas, "cable_speed": self.cable_speed_canvas,
+                                "detail": self.detail_canvas,
                                 "wifi": self.wifi_canvas, "ap": self.ap_canvas,
                                 "wifi_speed": self.wifi_speed_canvas}
         self.show_scanner_ui()
@@ -296,8 +299,19 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.ping_log.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=6)
 
     def build_results_ui(self):
+        # Results | Speed, same idea as Networks | Speed on the Wi-Fi tab
+        cable_views = [("Results", self.show_cable_results), ("Speed", self.show_cable_speed)]
         self.results_frame = tk.Frame(self.container, bg=BG)
+        self.make_switcher(self.results_frame, cable_views, "Results")
         self.scroll_canvas, self.scroll_content = self.make_scroll_area(self.results_frame)
+
+        # the speed graph for the cable test
+        self.cable_speed_frame = tk.Frame(self.container, bg=BG)
+        self.make_switcher(self.cable_speed_frame, cable_views, "Speed")
+        self.cable_speed_canvas, speed_inner = self.make_scroll_area(self.cable_speed_frame)
+        graph_card = self.make_card(speed_inner, "Cable speed")
+        self.cable_graph = MetricsGraph(graph_card, INTERFACE)
+        self.cable_graph.canvas.pack(fill=tk.X, padx=4, pady=4)
 
         # pass / fail at a glance
         summary = tk.Frame(self.scroll_content, bg=BG)
@@ -334,7 +348,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_dns_seen = self.make_row(dns, "Lookups")
         tk.Frame(dns, bg=CARD_BG, height=6).pack()
 
-        # just the numbers here, the graph lives on the Wi-Fi tab
+        # just the numbers here, the graph is on the Speed view
         speed = self.make_card(self.scroll_content, "Speed")
         self.res_down = self.make_row(speed, "Download")
         self.res_up = self.make_row(speed, "Upload")
@@ -440,6 +454,13 @@ class FlukeApp(HistoryScreens, WifiScreens):
     def current_tab(self):
         return VIEW_TAB[self.current_view]
 
+    def show_cable_results(self):
+        self.show_frame(self.results_frame, "results")
+
+    def show_cable_speed(self):
+        self.show_frame(self.cable_speed_frame, "cable_speed")
+        self.cable_speed_canvas.yview_moveto(0)
+
     # Cable tab: the scanner or the results, whichever the test is on
     def open_cable(self):
         if self.cable_view == "results":
@@ -484,6 +505,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_jitter.config(text=results["ping_jitter"])
         self.res_loss.config(text=results["ping_loss"])
         self.res_rating.config(text=results["speed_rating"])
+        self.cable_graph.show(results, self.speed_curves)
 
         self.cable_view = "results"
         if self.current_tab() == "cable":
@@ -601,6 +623,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
             self.scan_results = empty_scan_results(started=True)
             self.scan_results["link_speed"] = link_speed()
             self.cdp_poe = ""    # forget the last cable's PoE
+            self.speed_curves = {"down": [], "up": []}
             logger.info("cable connected, scan started (clock synced: %s)", self.scan_results["clock_synced"])
 
             # 2. find the switch (up to SWITCH_DISCOVERY_TIMEOUT)
@@ -645,7 +668,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
             # 4. speed test with the loading bar
             self.root.after(0, self.update_scanner, testing, TEXT, 3, "")
             self.root.after(0, self.start_loading_animation, "Connecting to closest server...")
-            run_bandwidth_test(
+            self.speed_curves = run_bandwidth_test(
                 self.scan_results, INTERFACE,
                 on_status=lambda text: self.root.after(0, self.set_loading_message, text)
             )

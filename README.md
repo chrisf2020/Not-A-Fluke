@@ -1,6 +1,6 @@
 # Not-A-Fluke
 
-A touchscreen network tester for the Raspberry Pi. Plug it into an Ethernet drop and it shows the switch, port, VLAN and PoE (from CDP/LLDP), checks DNS, measures latency, jitter and packet loss, and runs a speed test. The Wi-Fi tab scans nearby access points and runs a Wi-Fi speed test with a speed graph.
+A touchscreen network tester for the Raspberry Pi. Plug it into an Ethernet drop and it shows the switch, port, VLAN and PoE (from CDP/LLDP), checks DNS, measures latency, jitter and packet loss, and runs a speed test with a speed graph. The Wi-Fi tab scans nearby access points and runs the same speed test over Wi-Fi.
 
 ## Commands
 
@@ -31,7 +31,7 @@ Don't run the Python file with `sudo python3 ...`. Use `notafluke`, it sorts out
 | `fluke/switch.py` | CDP/LLDP (via lldpd) and PoE |
 | `fluke/dns.py` | DNS test |
 | `fluke/speed.py` | speed test, ping stats, quality score |
-| `fluke/graph.py` | the speed graph (Wi-Fi tab) |
+| `fluke/graph.py` | the speed graph (Cable and Wi-Fi tabs) |
 | `fluke/config.py` | version, ports, log paths, colours |
 | `tests/` | tests (`notafluke test`) |
 

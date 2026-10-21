@@ -182,6 +182,8 @@ class ScreenTests(unittest.TestCase):
             self.assertEqual(app.current_view, "history")
             app.open_cable()
             self.assertEqual(app.current_view, "results")
+            app.show_cable_speed()
+            self.assertEqual(app.current_tab(), "cable")
             app.show_wifi_frame()
             app.show_wifi_results(wifi.parse_iw_scan(IW_SCAN))
             app.show_ap_info(wifi.parse_iw_scan(IW_SCAN)[0])
