@@ -216,9 +216,9 @@ class ShareTests(unittest.TestCase):
         self.assertIn("DOWN 93.4", text)
         self.assertLess(len(text), 250)
 
-    def test_email_link_is_a_mailto_with_the_results(self):
-        link = share.scan_email_link(self.RECORD)
-        self.assertTrue(link.startswith("mailto:?body="))
+    def test_message_link_is_an_sms_with_the_results(self):
+        link = share.scan_message_link(self.RECORD)
+        self.assertTrue(link.startswith("sms:?&body="))
         self.assertIn("SW-01", link)
         self.assertNotIn(" ", link)     # spaces have to be encoded or phones won't open it
 

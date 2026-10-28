@@ -1,9 +1,10 @@
 # send a scan to your phone, two ways:
 #   PDF:  makes a PDF report, serves it from a tiny web server on the Pi, and the QR code is a
 #         link to it. The phone has to be on the same network as the Pi.
-#   Email: the QR code holds the scan itself as an email draft (a mailto: link). Works with no
-#         network at all: the phone opens its mail app with the results already typed in.
-#         (Plain text in a QR just gets Googled by the iPhone camera, so it has to be a link.)
+#   Message: the QR code holds the scan itself as a text message draft (an sms: link). Works with
+#         no network: the phone opens Messages with the results typed in, you pick who it goes to.
+#         (Plain text just gets Googled by the iPhone camera, and a mailto: with no address
+#         shows "Add to contacts", so it's sms.)
 
 import os
 import ssl
@@ -184,9 +185,9 @@ def scan_text(record):
     return "\n".join(lines)
 
 
-# the scan as an email draft link. No "to" address, you pick who it goes to (or send it to yourself)
-def scan_email_link(record):
-    return "mailto:?body=" + urllib.parse.quote(scan_text(record))
+# the scan as a text message draft link. "sms:?&body=" opens on both iPhone and Android
+def scan_message_link(record):
+    return "sms:?&body=" + urllib.parse.quote(scan_text(record))
 
 
 # QR code as rows of True (black) / False (white) squares, quiet border included
