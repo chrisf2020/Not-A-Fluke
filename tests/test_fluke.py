@@ -210,6 +210,12 @@ class ShareTests(unittest.TestCase):
             with open(path, "rb") as f:
                 self.assertEqual(f.read(4), b"%PDF")
 
+    def test_scan_text_fits_a_scannable_qr(self):
+        text = share.scan_text(self.RECORD)
+        self.assertIn("SW-01", text)
+        self.assertIn("DOWN 93.4", text)
+        self.assertLess(len(text), 250)
+
     def test_qr_matrix_is_square(self):
         try:
             matrix = share.qr_matrix("http://192.168.8.159:8080/scan.pdf")

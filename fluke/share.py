@@ -1,6 +1,8 @@
-# send a scan to your phone: makes a PDF report, serves it from a tiny web server on the Pi,
-# and gives a QR code that points at it. Scan the QR with the phone camera to open the PDF.
-# The phone has to be on the same network as the Pi (same Wi-Fi, or the network the cable is on).
+# send a scan to your phone, two ways:
+#   PDF:  makes a PDF report, serves it from a tiny web server on the Pi, and the QR code is a
+#         link to it. The phone has to be on the same network as the Pi.
+#   Text: the QR code holds the scan itself as text. Works with no network at all, the phone
+#         camera just shows the text (copy it, save it as a note, text it to someone).
 
 import os
 import threading
@@ -12,7 +14,11 @@ from .history import format_record_detail, format_stamp
 from .speed import get_ip
 
 REPORT_DIR = os.path.join(LOG_DIR, "reports")
-SHARE_PORT = 8080
+# port 80 so the link has no port in it. Phone browsers try https first: with no port that goes
+# to 443, gets refused straight away and falls back to http. With :8080 in the link the https
+# attempt hits this plain web server and the page just fails to load.
+SHARE_PORT = 80
+BACKUP_PORT = 8080      # used if something else already has port 80
 MAX_REPORTS = 20        # older PDFs get deleted so the SD card doesn't fill up
 
 # letter size page at 150 dpi
@@ -75,15 +81,22 @@ class ReportHandler(SimpleHTTPRequestHandler):
         logger.info("phone download: %s", format % args)
 
 
-# starts the web server the first time it's needed, then leaves it running
+# starts the web server the first time it's needed, then leaves it running.
+# returns the port it's on
 def start_server():
     global _server
     if _server is not None:
-        return
+        return _server.server_address[1]
     handler = partial(ReportHandler, directory=REPORT_DIR)
-    _server = ThreadingHTTPServer(("0.0.0.0", SHARE_PORT), handler)
+    try:
+        _server = ThreadingHTTPServer(("0.0.0.0", SHARE_PORT), handler)
+    except OSError:
+        logger.warning("port %d is taken, using %d for the report server", SHARE_PORT, BACKUP_PORT)
+        _server = ThreadingHTTPServer(("0.0.0.0", BACKUP_PORT), handler)
     threading.Thread(target=_server.serve_forever, daemon=True).start()
-    logger.info("report server running on port %d", SHARE_PORT)
+    port = _server.server_address[1]
+    logger.info("report server running on port %d", port)
+    return port
 
 
 # the Pi's address the phone can reach: its Wi-Fi first (phones are usually on Wi-Fi),
@@ -105,14 +118,41 @@ def share_record(record):
     name = report_filename(record)
     build_pdf(record, os.path.join(REPORT_DIR, name))
     delete_old_reports()
-    start_server()
-    return f"http://{ip}:{SHARE_PORT}/{name}", interface
+    port = start_server()
+    address = ip if port == 80 else f"{ip}:{port}"
+    return f"http://{address}/{name}", interface
+
+
+# the scan as short text for the Text QR (speeds in Mbps). Kept to about 200 characters so
+# the QR squares stay big enough for a phone to read off the small screen
+def scan_text(record):
+    def get(key):
+        value = str(record.get(key, "--"))
+        # shorter words for the long values, so more fits
+        for long, short in ((" / Untagged", ""), ("Not Advertised", "--"), ("Not advertised", "no"),
+                            (" Mbps", ""), (" ms", "ms"), (" %", "%"), ("GigabitEthernet", "Gi")):
+            value = value.replace(long, short)
+        return value
+
+    when = format_stamp(record.get("started_at"), short=True)
+    lines = [
+        f"NOT-A-FLUKE {when}",
+        f"SW {get('switch_name')} {get('switch_proto')}",
+        f"PORT {get('switch_port')} VLAN {get('switch_vlan')}",
+        f"SW IP {get('switch_ip')} VOICE {get('switch_voice')}",
+        f"POE {get('switch_poe')}  LINK {get('link_speed')}",
+        f"DOWN {get('speed_down')} UP {get('speed_up')} {get('speed_rating')}",
+        f"LAT {get('ping_latency')} JIT {get('ping_jitter')} LOSS {get('ping_loss')}",
+        f"DNS {get('dns_server')} {get('dns_time')}",
+    ]
+    return "\n".join(lines)
 
 
 # QR code as rows of True (black) / False (white) squares, quiet border included
-def qr_matrix(text):
+def qr_matrix(text, error_correction="M"):
     import qrcode
-    qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    levels = {"L": qrcode.constants.ERROR_CORRECT_L, "M": qrcode.constants.ERROR_CORRECT_M}
+    qr = qrcode.QRCode(border=2, error_correction=levels[error_correction])
     qr.add_data(text)
     qr.make(fit=True)
     return qr.get_matrix()

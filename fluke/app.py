@@ -67,7 +67,7 @@ def short_link(text):
 
 
 # QR code size on the Send to phone screen (pixels)
-QR_SIZE = 200
+QR_SIZE = 210
 
 # shown as the switch name when it's plugged into a router / unmanaged switch
 NO_SWITCH = "No managed switch"
@@ -396,29 +396,48 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.exit_armed = False
         self.exit_button.config(text=" ✕ ", bg=BAR_BG, fg=BAD)
 
-    # --- SEND TO PHONE (QR code -> PDF, see share.py) ---
+    # --- SEND TO PHONE (QR code -> PDF or text, see share.py) ---
 
     def build_share_ui(self):
         self.share_frame = tk.Frame(self.container, bg=BG)
-        self.make_header(self.share_frame, "Send to phone", back=self.close_share)
+        bar = self.make_header(self.share_frame, "Send to phone", back=self.close_share)
+        # PDF = link to a PDF (same network), Text = the scan itself in the QR (no network needed)
+        self.share_mode_buttons = {}
+        for mode in ("Text", "PDF"):
+            button = tk.Button(bar, text=mode, command=lambda m=mode: self.set_share_mode(m),
+                               font=("Helvetica", 11, "bold"), relief=tk.FLAT, bd=0, padx=10, pady=2,
+                               bg=BAR_BG, fg=TEXT, activebackground=ACCENT, highlightthickness=0)
+            button.pack(side=tk.RIGHT, padx=1)
+            self.share_mode_buttons[mode] = button
         body = tk.Frame(self.share_frame, bg=BG)
         body.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
         # QR on the left, what to do on the right
         self.qr_canvas = tk.Canvas(body, width=QR_SIZE, height=QR_SIZE, bg="white", highlightthickness=0)
-        self.qr_canvas.pack(side=tk.LEFT)
+        self.qr_canvas.pack(side=tk.LEFT, anchor="n")
         self.share_lbl = tk.Label(body, text="", font=("Helvetica", 11), bg=BG, fg=TEXT,
-                                  justify=tk.LEFT, anchor="nw", wraplength=190)
+                                  justify=tk.LEFT, anchor="nw", wraplength=180)
         self.share_lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
 
     # record = the scan to send, came_from = "results" or "detail" (where Back goes)
     def open_share(self, record, came_from):
         self.share_came_from = came_from
+        self.share_record = dict(record)
         view = "share_cable" if came_from == "results" else "share_history"
-        self.qr_canvas.delete("all")
-        self.share_lbl.config(text="Making the PDF...", fg=TEXT)
         self.show_frame(self.share_frame, view)
+        self.set_share_mode("PDF")
+
+    def set_share_mode(self, mode):
+        self.share_mode = mode
+        for name, button in self.share_mode_buttons.items():
+            on = name == mode
+            button.config(bg=ACCENT if on else BAR_BG, fg="#000000" if on else TEXT)
+        self.qr_canvas.delete("all")
+        if mode == "Text":
+            self.show_text_share()
+            return
+        self.share_lbl.config(text="Making the PDF...", fg=TEXT)
         # the PDF takes a second, so make it off the screen thread
-        threading.Thread(target=self.make_share, args=(dict(record),), daemon=True).start()
+        threading.Thread(target=self.make_share, args=(self.share_record,), daemon=True).start()
 
     def make_share(self, record):
         from .share import share_record, qr_matrix
@@ -430,28 +449,54 @@ class FlukeApp(HistoryScreens, WifiScreens):
             self.root.after(0, self.share_failed, "The QR package is missing. Run  notafluke  once over SSH to install it.")
             return
         except Exception as err:
-            logger.exception("could not share the scan")
-            self.root.after(0, self.share_failed, f"Couldn't make the PDF: {err}")
+            logger.exception("could not share the scan as a PDF")
+            # no network to share it on (no IP etc.): the text QR still works
+            self.root.after(0, self.share_failed, f"No PDF: {err}.\n\nShowing the Text QR instead, it works without a network.", True)
             return
         self.root.after(0, self.show_share, url, interface, matrix)
 
     def show_share(self, url, interface, matrix):
+        if self.share_mode != "PDF":    # switched to Text while the PDF was being made
+            return
+        self.draw_qr(matrix)
+        network = "Wi-Fi" if interface == WIFI_INTERFACE else "the cable's network"
+        self.share_lbl.config(fg=TEXT, text=(
+            "Scan with your phone camera to open the PDF.\n\n"
+            f"Your phone needs to be on the same network as the Pi ({network}). "
+            "Not on it? Tap Text.\n\n"
+            f"{url}"))
+
+    def show_text_share(self):
+        from .share import scan_text, qr_matrix
+        try:
+            # L = least error correction, so the squares stay as big as possible
+            self.draw_qr(qr_matrix(scan_text(self.share_record), error_correction="L"))
+        except ImportError:
+            self.share_failed("The QR package is missing. Run  notafluke  once over SSH to install it.")
+            return
+        self.share_lbl.config(fg=TEXT, text=(
+            "Scan with your phone camera. The scan results show up as text, "
+            "no Wi-Fi or data needed.\n\n"
+            "Copy it, save it as a note, or text it to someone."))
+
+    # black squares on the white canvas, as big as fit
+    def draw_qr(self, matrix):
         self.qr_canvas.delete("all")
-        cell = QR_SIZE // len(matrix)
-        offset = (QR_SIZE - cell * len(matrix)) // 2
+        # cell size isn't rounded down, so the QR always fills the whole box (bigger squares)
+        cell = QR_SIZE / len(matrix)
+        offset = 0
         for row_number, row in enumerate(matrix):
             for column_number, black in enumerate(row):
                 if black:
                     x = offset + column_number * cell
                     y = offset + row_number * cell
                     self.qr_canvas.create_rectangle(x, y, x + cell, y + cell, fill="black", outline="")
-        network = "Wi-Fi" if interface == WIFI_INTERFACE else "the cable's network"
-        self.share_lbl.config(fg=TEXT, text=(
-            "Scan with your phone camera to open the PDF report.\n\n"
-            f"Your phone needs to be on the same network as the Pi ({network}).\n\n"
-            f"{url}"))
 
-    def share_failed(self, message):
+    def share_failed(self, message, use_text=False):
+        if use_text and self.share_mode == "PDF":
+            self.set_share_mode("Text")
+            self.share_lbl.config(text=message + "\n\n" + self.share_lbl.cget("text"), fg=TEXT)
+            return
         self.qr_canvas.delete("all")
         self.share_lbl.config(text=message, fg=BAD)
 
