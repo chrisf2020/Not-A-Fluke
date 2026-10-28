@@ -136,7 +136,7 @@ autostart() {
   cat > /etc/systemd/system/notafluke.service <<UNIT
 [Unit]
 Description=Not-A-Fluke touchscreen GUI
-After=systemd-user-sessions.service lldpd.service
+After=systemd-user-sessions.service lldpd.service plymouth-quit-wait.service getty@tty1.service
 
 [Service]
 Type=simple
@@ -153,9 +153,16 @@ UNIT
 stop() { pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI_MATCH" 2>/dev/null; }
 
 # after the GUI closes, clear the small screen and move tty1-6 back onto it
+# the text console and the GUI share the one small screen. 0 = console stops drawing on it
+# (otherwise the login prompt and cursor show through the GUI), 1 = console back on
+console_bind() {
+  for con in /sys/class/vtconsole/vtcon*/; do grep -q "frame buffer" "$con/name" && echo "$1" > "$con/bind"; done
+}
+
 closed_screen() {
   TFT_NUM=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5 | tr -d fb)
   [ -n "$TFT_NUM" ] || return
+  console_bind 1
   dd if=/dev/zero of=/dev/fb$TFT_NUM bs=64k status=none 2>/dev/null
   # map to HDMI and back to force a redraw
   for tty in 1 2 3 4 5 6; do con2fbmap $tty 0; con2fbmap $tty $TFT_NUM; done
@@ -170,7 +177,7 @@ case "$1" in
   # from the shutdown service: stop the console drawing on the small screen and paint it black,
   # so it's black instead of white once the Pi is off
   blank)
-    for con in /sys/class/vtconsole/vtcon*/; do grep -q "frame buffer" "$con/name" && echo 0 > "$con/bind"; done
+    console_bind 0
     [ -n "$FB" ] && dd if=/dev/zero of=/dev/$FB bs=64k status=none 2>/dev/null
     exit 0 ;;
   calibrate)
@@ -278,12 +285,12 @@ CMD=(xinit "$CONF_DIR/session" -- /usr/bin/Xorg "$DISPLAY_NUM" -config "$CONF_DI
      -logfile /tmp/notafluke-xorg.log)
 
 # run the GUI, then give the screen back to the terminal
-run() { "${CMD[@]}"; closed_screen; }
+run() { console_bind 0; "${CMD[@]}"; closed_screen; }
 
 if [ "$1" = "-f" ]; then
   run; exit
 fi
-export -f run closed_screen
+export -f run closed_screen console_bind
 export CMD_STR="$(printf '%q ' "${CMD[@]}")"
 setsid nohup bash -c 'eval "CMD=($CMD_STR)"; run' >"$LOG" 2>&1 < /dev/null &
 echo "Not-A-Fluke is running on the small screen.  Stop: notafluke stop   Log: notafluke log"
