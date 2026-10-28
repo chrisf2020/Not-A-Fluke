@@ -1,0 +1,493 @@
+diff --git a/README.md b/README.md
+index 162eae9..bf898e6 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # Not-A-Fluke
+ 
+-A touchscreen network tester for the Raspberry Pi. Plug it into an Ethernet drop and it shows the switch, port, VLAN and PoE (from CDP/LLDP), checks DNS, measures latency, jitter and packet loss, and runs a speed test with a graph. The Wi-Fi tab scans nearby access points and can run the speed test over Wi-Fi too.
++A touchscreen network tester for the Raspberry Pi. Plug it into an Ethernet drop and it shows the switch, port, VLAN and PoE (from CDP/LLDP), checks DNS, measures latency, jitter and packet loss, and runs a speed test with a graph. The Wi-Fi tab scans nearby access points, draws a channel map (2.4 / 5 GHz) and can run the speed test over Wi-Fi too.
+ 
+ ## Commands
+ 
+@@ -31,7 +31,7 @@ Don't run the Python file with `sudo python3 ...`. Use `notafluke`, it sorts out
+ | `fluke/switch.py` | CDP/LLDP (via lldpd) and PoE |
+ | `fluke/dns.py` | DNS test |
+ | `fluke/speed.py` | speed test, ping stats, quality score |
+-| `fluke/graph.py` | the speed graph |
++| `fluke/graph.py` | the speed graph and the Wi-Fi channel map |
+ | `fluke/config.py` | version, ports, log paths, colours |
+ | `tests/` | tests (`notafluke test`) |
+ 
+diff --git a/fluke/app.py b/fluke/app.py
+index ea2e887..de5735d 100644
+--- a/fluke/app.py
++++ b/fluke/app.py
+@@ -23,7 +23,7 @@ SCAN_STEPS = ["Switch", "DNS", "Ping", "Speed"]
+ 
+ # which tab each screen belongs to
+ VIEW_TAB = {"scanner": "cable", "results": "cable", "wifi": "wifi", "ap": "wifi",
+-            "wifi_speed": "wifi", "history": "history", "detail": "history"}
++            "wifi_speed": "wifi", "channels": "wifi", "history": "history", "detail": "history"}
+ 
+ 
+ # blank scan record. "--" while waiting, then each test starts as "Failed" until it passes
+@@ -172,8 +172,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
+         self.build_wifi_ui()
+         self.build_ap_ui()
+         self.build_wifi_speed_ui()
++        self.build_wifi_channels_ui()
+         self.frames = [self.scanner_frame, self.results_frame, self.history_frame, self.detail_frame,
+-                       self.wifi_frame, self.ap_frame, self.wifi_speed_frame]
++                       self.wifi_frame, self.ap_frame, self.wifi_speed_frame, self.channels_frame]
+         self.scroll_canvases = {"results": self.scroll_canvas, "detail": self.detail_canvas,
+                                 "wifi": self.wifi_canvas, "ap": self.ap_canvas,
+                                 "wifi_speed": self.wifi_speed_canvas}
+diff --git a/fluke/graph.py b/fluke/graph.py
+index 3a7f2a1..64e2e38 100644
+--- a/fluke/graph.py
++++ b/fluke/graph.py
+@@ -1,6 +1,7 @@
+ # the Performance Metrics graph: speed curves, latency / jitter / loss, quality score
+-# shown after the cable test and on the Wi-Fi tab
++# shown after the cable test and on the Wi-Fi tab. also the Wi-Fi channel map (ChannelGraph)
+ 
++import re
+ import tkinter as tk
+ import tkinter.font as tkfont
+ 
+@@ -9,6 +10,15 @@ from .speed import read_number, network_quality, QUALITY_RULES, PING_COUNT, PING
+ 
+ DOWN_COLOR = "#FF9A2E"
+ UP_COLOR = "#B15CFF"
++# one colour per access point on the channel map, strongest AP gets the first one
++CHANNEL_COLORS = ["#FFEB3B", "#00E5FF", "#FF5252", "#B15CFF", "#76FF03", "#FF9A2E", "#4DA3FF", "#FF80AB"]
++# channel map x axis per band: (lowest MHz, highest MHz, channel numbers to label)
++BAND_AXES = {
++    "2.4": (2397, 2497, list(range(1, 15))),
++    "5": (5140, 5850, [36, 44, 52, 60, 100, 108, 116, 124, 132, 140, 149, 157, 165]),
++}
++SIGNAL_MIN = -100
++SIGNAL_MAX = -30
+ RATING_COLORS = {"Great": "#4DA3FF", "Good": "#76FF03", "Average": "#FFD700",
+                  "Poor": "#FF5252", "N/A": "#888888"}
+ 
+@@ -199,3 +209,131 @@ class MetricsGraph:
+     def on_resize(self, event):
+         if event.width > 1 and event.width != self.drawn_width:
+             self.draw()
++
++
++# --- WI-FI CHANNEL MAP ---
++
++# "80 MHz" -> 80, 20 if the scan didn't say
++def width_mhz(text):
++    match = re.match(r"\d+", text or "")
++    return int(match.group()) if match else 20
++
++
++# 6 -> 2437, 36 -> 5180 (14 is the odd one out on 2.4 GHz)
++def channel_freq(channel, band):
++    if band == "2.4":
++        return 2484 if channel == 14 else 2407 + 5 * channel
++    return 5000 + 5 * channel
++
++
++# only the APs on this band ("2.4" or "5"), strongest first
++def band_aps(aps, band):
++    if band == "2.4":
++        picked = [ap for ap in aps if 2400 <= ap["freq"] < 3000]
++    else:
++        picked = [ap for ap in aps if 5000 <= ap["freq"] < 5925]
++    return sorted(picked, key=lambda ap: ap["signal"], reverse=True)
++
++
++# dBm -> pixel row, clamped so a weird reading never draws outside the box
++def signal_y(dbm, top, bottom):
++    dbm = max(SIGNAL_MIN, min(SIGNAL_MAX, dbm))
++    return bottom - (dbm - SIGNAL_MIN) / (SIGNAL_MAX - SIGNAL_MIN) * (bottom - top)
++
++
++# flat [x, y, x, y, ...] for one arch: starts on the bottom line, peaks at (cx, top), ends on the bottom line
++def arch_points(cx, top, half, bottom, steps=14):
++    coords = []
++    for k in range(-steps, steps + 1):
++        t = k / steps
++        coords += [cx + t * half, top + (bottom - top) * t * t]
++    return coords
++
++
++# squeezes every x in a flat coordinate list into left..right
++def clip_x(coords, left, right):
++    return [max(left, min(right, v)) if k % 2 == 0 else v for k, v in enumerate(coords)]
++
++
++# long names get cut so the labels stay readable on the small screen
++def short_name(ssid, limit=12):
++    return ssid if len(ssid) <= limit else ssid[:limit - 1] + "…"
++
++
++# Wi-Fi Analyzer style chart: one filled arch per AP, centred on its channel and as wide as
++# its channel width, height is the signal strength. aps come from scan_wifi() in wifi.py
++def draw_channel_chart(canvas, width, height, aps, band):
++    left, right, top, bottom = 34, width - 8, 8, height - 18
++    low, high, labelled = BAND_AXES[band]
++    span = high - low
++
++    def freq_x(freq):
++        return left + (freq - low) / span * (right - left)
++
++    #dBm grid and labels
++    for dbm in range(SIGNAL_MIN + 10, SIGNAL_MAX + 1, 10):
++        y = signal_y(dbm, top, bottom)
++        canvas.create_line(left, y, right, y, fill="#2A2A2A")
++        canvas.create_text(left - 4, y, text=str(dbm), anchor="e", fill="#8A8A8A", font=("Helvetica", 8))
++    canvas.create_line(left, bottom, right, bottom, fill="#555555")
++
++    #channel numbers under the axis
++    for channel in labelled:
++        x = freq_x(channel_freq(channel, band))
++        canvas.create_line(x, bottom, x, bottom + 3, fill="#555555")
++        canvas.create_text(x, bottom + 4, text=str(channel), anchor="n", fill="#BBBBBB", font=("Helvetica", 8))
++
++    in_band = band_aps(aps, band)
++    if len(in_band) == 0:
++        canvas.create_text((left + right) / 2, (top + bottom) / 2, text=f"No networks on {band} GHz",
++                           fill="#666666", font=("Helvetica", 11))
++        return
++
++    #fills first (weakest underneath) so every outline stays visible on top of the overlaps
++    shapes = []
++    for rank, ap in enumerate(in_band):
++        color = CHANNEL_COLORS[rank % len(CHANNEL_COLORS)]
++        peak = signal_y(ap["signal"], top, bottom)
++        half = width_mhz(ap["width"]) / 2 / span * (right - left)
++        shapes.append((ap, color, freq_x(ap.get("center", ap["freq"])), peak, half))
++    for ap, color, cx, peak, half in reversed(shapes):
++        canvas.create_polygon(*clip_x(arch_points(cx, peak, half, bottom), left, right), fill=blend(color, CARD_BG, 0.7), outline="")
++    for ap, color, cx, peak, half in reversed(shapes):
++        canvas.create_line(*clip_x(arch_points(cx, peak, half, bottom), left, right), fill=color, width=3 if ap["connected"] else 2)
++
++    #names above the peaks, nudged up when two would sit on top of each other
++    placed = []
++    for ap, color, cx, peak, half in shapes:
++        label_x = max(left + 30, min(right - 30, cx))
++        label_y = peak - 2
++        for other_x, other_y in placed:
++            if abs(other_x - label_x) < 64 and abs(other_y - label_y) < 11:
++                label_y = other_y - 11
++        if label_y < top + 8:                       #no room above, put it inside the arch
++            label_y = peak + 12
++        placed.append((label_x, label_y))
++        name = "hidden" if ap["ssid"] == "<hidden>" else short_name(ap["ssid"])
++        canvas.create_text(label_x, label_y, text=name, anchor="s", fill=color,
++                           font=("Helvetica", 8, "bold" if ap["connected"] else "normal"))
++
++
++# the channel map canvas. show() gives it a scan and a band, it redraws whenever it is resized
++class ChannelGraph:
++    def __init__(self, parent):
++        self.aps = []
++        self.band = "2.4"
++        self.canvas = tk.Canvas(parent, bg=CARD_BG, highlightthickness=0)
++        self.canvas.bind("<Configure>", lambda event: self.draw())
++
++    def show(self, aps, band):
++        self.aps = aps
++        self.band = band
++        self.draw()
++
++    def draw(self):
++        self.canvas.delete("all")
++        width = self.canvas.winfo_width()
++        height = self.canvas.winfo_height()
++        if width < 100 or height < 80:              #hidden frames report a tiny size
++            return
++        draw_channel_chart(self.canvas, width, height, self.aps, self.band)
+diff --git a/fluke/wifi.py b/fluke/wifi.py
+index 6ab85e0..a7d23d2 100644
+--- a/fluke/wifi.py
++++ b/fluke/wifi.py
+@@ -10,7 +10,7 @@ import tkinter as tk
+ from datetime import datetime
+ 
+ from .config import WIFI_INTERFACE, BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger
+-from .graph import MetricsGraph
++from .graph import MetricsGraph, ChannelGraph, band_aps
+ from .speed import get_ip, route_interface, run_ping_test, run_bandwidth_test, speed_test_lock
+ 
+ 
+@@ -29,6 +29,20 @@ def freq_to_channel(freq):
+     return 0
+ 
+ 
++# middle of the AP's whole channel in MHz. freq is only the primary 20 MHz channel, a 40 or 80 MHz
++# AP is centred somewhere else (the channel map needs the middle to draw the arch in the right place)
++def ap_center_freq(ap):
++    width = int(re.match(r"\d+", ap["width"]).group())
++    if width >= 80 and ap.get("segment1", 0) > 0 and ap["freq"] < 5925:
++        segment = ap.get("segment2", 0) if width == 160 and ap.get("segment2", 0) > 0 else ap["segment1"]
++        return 5000 + 5 * segment
++    if width == 40 and ap.get("offset") == "above":
++        return ap["freq"] + 10
++    if width == 40 and ap.get("offset") == "below":
++        return ap["freq"] - 10
++    return ap["freq"]
++
++
+ # parses "iw dev wlan0 scan" output into a list of AP dicts
+ def parse_iw_scan(text):
+     access_points = []
+@@ -78,6 +92,12 @@ def parse_iw_scan(text):
+             width = re.search(r"\((.*MHz)\)", line)
+             if width:
+                 ap["width"] = width.group(1)
++        elif "secondary channel offset:" in line:
++            ap["offset"] = line.split(":")[1].strip()
++        elif "center freq segment 1:" in line:
++            ap["segment1"] = int(line.split(":")[1])
++        elif "center freq segment 2:" in line:
++            ap["segment2"] = int(line.split(":")[1])
+         elif line.startswith("HT capabilities") and ap["standard"] == "a/b/g":
+             ap["standard"] = "Wi-Fi 4 (n)"
+         elif line.startswith("VHT capabilities"):
+@@ -87,6 +107,12 @@ def parse_iw_scan(text):
+         elif line.startswith("EHT capabilities"):
+             ap["standard"] = "Wi-Fi 7 (be)"
+ 
++    for ap in access_points:
++        # HT only says "secondary channel offset: above/below" for a 40 MHz AP, never the width
++        if ap["width"] == "20 MHz" and ap.get("offset") in ("above", "below"):
++            ap["width"] = "40 MHz"
++        ap["center"] = ap_center_freq(ap)
++
+     # SAE is WPA3, lots of APs offer both
+     for ap in access_points:
+         if "SAE" in ap["auth"] and "PSK" in ap["auth"]:
+@@ -219,11 +245,15 @@ def ap_detail_rows(ap):
+ 
+ class WifiScreens:
+ 
++    # the three buttons along the top of every Wi-Fi screen
++    def wifi_tabs(self):
++        return [("Networks", self.show_wifi_frame), ("Channels", self.open_wifi_channels), ("Speed", self.open_wifi_speed)]
++
+     # list of nearby networks, strongest first
+     def build_wifi_ui(self):
+         self.wifi_scanning = False
+         self.wifi_frame = tk.Frame(self.container, bg=BG)
+-        self.make_switcher(self.wifi_frame, [("Networks", self.show_wifi_frame), ("Speed", self.open_wifi_speed)], "Networks")
++        self.make_switcher(self.wifi_frame, self.wifi_tabs(), "Networks")
+ 
+         top = tk.Frame(self.wifi_frame, bg=BG)
+         top.pack(fill=tk.X, padx=8)
+@@ -234,6 +264,25 @@ class WifiScreens:
+ 
+         self.wifi_canvas, self.wifi_rows = self.make_scroll_area(self.wifi_frame)
+ 
++    # channel map: every nearby AP drawn as an arch on its channel, one band at a time
++    def build_wifi_channels_ui(self):
++        self.wifi_aps = []
++        self.channel_band = "2.4"
++        self.channels_frame = tk.Frame(self.container, bg=BG)
++        self.make_switcher(self.channels_frame, self.wifi_tabs(), "Channels")
++
++        top = tk.Frame(self.channels_frame, bg=BG)
++        top.pack(fill=tk.X, padx=8)
++        self.channels_status_lbl = tk.Label(top, text="", font=("Helvetica", 10), bg=BG, fg=MUTED)
++        self.channels_status_lbl.pack(side=tk.LEFT)
++        self.channels_scan_button = self.make_button(top, "↻ Scan", self.start_wifi_scan, size=11)
++        self.channels_scan_button.pack(side=tk.RIGHT, pady=2)
++        self.channels_band_button = self.make_button(top, "2.4 GHz", self.toggle_channel_band, size=11)
++        self.channels_band_button.pack(side=tk.RIGHT, padx=4, pady=2)
++
++        self.channel_graph = ChannelGraph(self.channels_frame)
++        self.channel_graph.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 4))
++
+     # shown when a network is tapped
+     def build_ap_ui(self):
+         self.ap_frame = tk.Frame(self.container, bg=BG)
+@@ -247,7 +296,7 @@ class WifiScreens:
+         self.wifi_speed_running = False
+         self.wifi_speed_done = False
+         self.wifi_speed_frame = tk.Frame(self.container, bg=BG)
+-        self.make_switcher(self.wifi_speed_frame, [("Networks", self.show_wifi_frame), ("Speed", self.open_wifi_speed)], "Speed")
++        self.make_switcher(self.wifi_speed_frame, self.wifi_tabs(), "Speed")
+ 
+         top = tk.Frame(self.wifi_speed_frame, bg=BG)
+         top.pack(fill=tk.X, padx=8)
+@@ -263,7 +312,7 @@ class WifiScreens:
+         self.wifi_graph.canvas.pack(fill=tk.X, padx=4, pady=4)
+ 
+     def open_wifi(self):
+-        if self.current_view == "wifi_speed":
++        if self.current_view in ("wifi_speed", "channels"):
+             return
+         self.show_wifi_frame()
+         self.start_wifi_scan()
+@@ -271,16 +320,39 @@ class WifiScreens:
+     def show_wifi_frame(self):
+         self.show_frame(self.wifi_frame, "wifi")
+ 
++    # Channels button: shows the last scan, or scans if there hasn't been one yet
++    def open_wifi_channels(self):
++        self.show_frame(self.channels_frame, "channels")
++        if len(self.wifi_aps) == 0 and not self.wifi_scanning:
++            self.start_wifi_scan()
++
++    # flips the channel map between 2.4 GHz and 5 GHz
++    def toggle_channel_band(self):
++        self.channel_band = "5" if self.channel_band == "2.4" else "2.4"
++        self.channels_band_button.config(text=f"{self.channel_band} GHz")
++        self.update_channel_status()
++        self.channel_graph.show(self.wifi_aps, self.channel_band)
++
++    # "4 on 2.4 GHz at 12:24 PM" under the Channels tab
++    def update_channel_status(self):
++        if len(self.wifi_aps) == 0:
++            return
++        count = len(band_aps(self.wifi_aps, self.channel_band))
++        self.channels_status_lbl.config(text=f"{count} on {self.channel_band} GHz at {self.wifi_scan_stamp}")
++
+     # scan takes ~4s so it runs on a thread to keep the screen responsive
+     def start_wifi_scan(self):
+         if self.wifi_scanning:
+             return
+         if not has_wifi():
+             self.wifi_status_lbl.config(text="No Wi-Fi adapter on this device")
++            self.channels_status_lbl.config(text="No Wi-Fi adapter on this device")
+             return
+         self.wifi_scanning = True
+         self.wifi_scan_button.config(text="Scanning...")
++        self.channels_scan_button.config(text="Scanning...")
+         self.wifi_status_lbl.config(text="Looking for networks...")
++        self.channels_status_lbl.config(text="Looking for networks...")
+         threading.Thread(target=self.wifi_scan_thread, daemon=True).start()
+ 
+     def wifi_scan_thread(self):
+@@ -295,12 +367,19 @@ class WifiScreens:
+     def show_wifi_results(self, access_points):
+         self.wifi_scanning = False
+         self.wifi_scan_button.config(text="↻ Scan")
++        self.channels_scan_button.config(text="↻ Scan")
+ 
+         for child in self.wifi_rows.winfo_children():
+             child.destroy()
+         self.wifi_canvas.yview_moveto(0)
+ 
+         stamp = datetime.now().strftime("%I:%M %p")
++        self.wifi_aps = access_points
++        self.wifi_scan_stamp = stamp
++        self.channel_graph.show(access_points, self.channel_band)
++        self.update_channel_status()
++        if len(access_points) == 0:
++            self.channels_status_lbl.config(text="No networks found")
+         self.wifi_status_lbl.config(text=f"{len(access_points)} networks at {stamp}, tap one for info")
+ 
+         if len(access_points) == 0:
+diff --git a/tests/test_fluke.py b/tests/test_fluke.py
+index eafe23a..64772fc 100644
+--- a/tests/test_fluke.py
++++ b/tests/test_fluke.py
+@@ -4,7 +4,7 @@ import os
+ import tempfile
+ import unittest
+ 
+-from fluke import config, history, speed, switch, wifi
++from fluke import config, graph, history, speed, switch, wifi
+ 
+ IW_SCAN = """BSS 18:60:41:57:46:56(on wlan0) -- associated
+ \tfreq: 2437.0
+@@ -23,6 +23,28 @@ BSS aa:bb:cc:dd:ee:ff(on wlan0)
+ \t\t * channel utilisation: 51/255
+ """
+ 
++IW_SCAN_WIDE = """BSS 11:22:33:44:55:66(on wlan0)
++\tfreq: 5180
++\tsignal: -55.00 dBm
++\tSSID: Office5G
++\tHT operation:
++\t\t * primary channel: 36
++\t\t * secondary channel offset: above
++\t\t * STA channel width: any
++\tVHT operation:
++\t\t * channel width: 1 (80 MHz)
++\t\t * center freq segment 1: 42
++\t\t * center freq segment 2: 0
++BSS 66:55:44:33:22:11(on wlan0)
++\tfreq: 2462
++\tsignal: -70.00 dBm
++\tSSID: Garage
++\tHT operation:
++\t\t * primary channel: 11
++\t\t * secondary channel offset: below
++\t\t * STA channel width: any
++"""
++
+ PING = """64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=10.0 ms
+ 64 bytes from 1.1.1.1: icmp_seq=2 ttl=57 time=14.0 ms
+ 64 bytes from 1.1.1.1: icmp_seq=3 ttl=57 time=12.0 ms
+@@ -52,6 +74,12 @@ class WifiTests(unittest.TestCase):
+         self.assertEqual((home["security"], home["standard"], home["connected"]), ("WPA2/3", "Wi-Fi 5 (ac)", True))
+         self.assertEqual((hidden["ssid"], hidden["channel"], hidden["clients"], hidden["busy"]), ("<hidden>", 36, "3", "20%"))
+ 
++    def test_ap_center(self):
++        wide, garage = wifi.parse_iw_scan(IW_SCAN_WIDE)
++        self.assertEqual((wide["width"], wide["center"]), ("80 MHz", 5210))
++        self.assertEqual((garage["width"], garage["center"]), ("40 MHz", 2452))
++        self.assertEqual(wifi.parse_iw_scan(IW_SCAN)[0]["center"], 2437)
++
+     def test_parse_iw_link(self):
+         self.assertIsNone(wifi.parse_iw_link("Not connected."))
+         link = wifi.parse_iw_link("Connected to 18:60:41:57:46:56 (on wlan0)\n\tSSID: HomeNet\n\tsignal: -52 dBm\n")
+@@ -68,6 +96,40 @@ class WifiTests(unittest.TestCase):
+         self.assertEqual(wifi.signal_bars(-65), "▂▄▆ ")
+ 
+ 
++class ChannelGraphTests(unittest.TestCase):
++    APS = [
++        {"ssid": "Weak", "freq": 2462, "signal": -85, "width": "20 MHz", "connected": False},
++        {"ssid": "Strong", "freq": 2412, "signal": -40, "width": "40 MHz", "connected": True},
++        {"ssid": "FiveGig", "freq": 5180, "signal": -60, "width": "80 MHz", "connected": False},
++    ]
++
++    def test_band_filter(self):
++        self.assertEqual([ap["ssid"] for ap in graph.band_aps(self.APS, "2.4")], ["Strong", "Weak"])
++        self.assertEqual([ap["ssid"] for ap in graph.band_aps(self.APS, "5")], ["FiveGig"])
++
++    def test_width_and_channel_freq(self):
++        self.assertEqual([graph.width_mhz(t) for t in ("20 MHz", "160 MHz", "", None)], [20, 160, 20, 20])
++        self.assertEqual([graph.channel_freq(c, "2.4") for c in (1, 6, 14)], [2412, 2437, 2484])
++        self.assertEqual([graph.channel_freq(c, "5") for c in (36, 165)], [5180, 5825])
++
++    def test_signal_y(self):
++        self.assertEqual(graph.signal_y(-30, 10, 110), 10)
++        self.assertEqual(graph.signal_y(-100, 10, 110), 110)
++        self.assertEqual(graph.signal_y(-20, 10, 110), 10)          #too strong, clamped to the top
++        self.assertEqual(graph.signal_y(-130, 10, 110), 110)        #too weak, clamped to the bottom
++
++    def test_arch_points(self):
++        points = graph.arch_points(100, 20, 30, 120, steps=2)
++        self.assertEqual(points, [70, 120, 85, 45, 100, 20, 115, 45, 130, 120])
++
++    def test_clip_x(self):
++        self.assertEqual(graph.clip_x([5, 10, 50, 20, 300, 30], 20, 200), [20, 10, 50, 20, 200, 30])
++
++    def test_short_name(self):
++        self.assertEqual(graph.short_name("HomeNet"), "HomeNet")
++        self.assertEqual(graph.short_name("A very long network name"), "A very long…")
++
++
+ class SpeedTests(unittest.TestCase):
+     def test_parse_ping(self):
+         ping = speed.parse_ping_output(PING)
+@@ -185,6 +247,9 @@ class ScreenTests(unittest.TestCase):
+             app.show_wifi_frame()
+             app.show_wifi_results(wifi.parse_iw_scan(IW_SCAN))
+             app.show_ap_info(wifi.parse_iw_scan(IW_SCAN)[0])
++            app.open_wifi_channels()
++            app.toggle_channel_band()
++            app.toggle_channel_band()
+             app.show_frame(app.wifi_speed_frame, "wifi_speed")
+             app.finish_wifi_speed_test({"speed_down": "50 Mbps"}, {"down": [1, 2, 3], "up": []})
+             app.rescan_pressed()
