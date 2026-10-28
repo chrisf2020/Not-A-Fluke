@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from fluke import config, history, speed, switch, wifi
+from fluke import config, history, share, speed, switch, wifi
 
 IW_SCAN = """BSS 18:60:41:57:46:56(on wlan0) -- associated
 \tfreq: 2437.0
@@ -195,6 +195,28 @@ class ScreenTests(unittest.TestCase):
             self.assertEqual(app.current_view, "wifi_speed")
         finally:
             root.destroy()
+
+
+class ShareTests(unittest.TestCase):
+    RECORD = {"started_at": "2026-10-28T12:59:29", "switch_name": "SW-01", "speed_down": "93.4 Mbps"}
+
+    def test_report_filename_has_no_colons(self):
+        self.assertEqual(share.report_filename(self.RECORD), "scan-2026-10-28_12-59-29.pdf")
+
+    def test_build_pdf_makes_a_pdf(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "report.pdf")
+            share.build_pdf(self.RECORD, path)
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(4), b"%PDF")
+
+    def test_qr_matrix_is_square(self):
+        try:
+            matrix = share.qr_matrix("http://192.168.8.159:8080/scan.pdf")
+        except ImportError:
+            self.skipTest("python3-qrcode not installed")
+        self.assertGreater(len(matrix), 20)
+        self.assertEqual(len(matrix), len(matrix[0]))
 
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ fi
 FB=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5)
 
 # packages come from apt, newer Pi OS / Debian block sudo pip install
-PACKAGES="python3 python3-tk python3-scapy speedtest-cli lldpd iw tcpdump network-manager iputils-ping iproute2 x11-xserver-utils"
+PACKAGES="python3 python3-tk python3-scapy speedtest-cli lldpd iw tcpdump network-manager iputils-ping iproute2 x11-xserver-utils python3-pil python3-qrcode"
 # extra packages for the small screen
 [ -n "$FB" ] && PACKAGES="$PACKAGES xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit matchbox-window-manager fbset x11vnc"
 

@@ -183,7 +183,10 @@ class HistoryScreens:
 
     def build_detail_ui(self):
         self.detail_frame = tk.Frame(self.container, bg=BG)
-        self.make_header(self.detail_frame, "Scan detail", back=self.show_history_frame)
+        bar = self.make_header(self.detail_frame, "Scan detail", back=self.show_history_frame)
+        # send this scan to a phone as a PDF (share.py)
+        self.make_button(bar, "QR", lambda: self.open_share(self.detail_record, "detail"),
+                         size=11).pack(side=tk.RIGHT, padx=6)
 
         # scrollable since a full scan doesn't fit on screen
         self.detail_canvas, detail_inner = self.make_scroll_area(self.detail_frame)
@@ -239,6 +242,7 @@ class HistoryScreens:
             self.render_history_page()
 
     def show_detail_ui(self, record):
+        self.detail_record = record
         self.detail_lbl.config(text=format_record_detail(record))
         self.show_frame(self.detail_frame, "detail")
         self.detail_canvas.yview_moveto(0)

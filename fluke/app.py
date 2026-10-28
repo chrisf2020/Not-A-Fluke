@@ -7,13 +7,13 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
-from .config import (VERSION, INTERFACE, WIFI_INTERFACE, CARRIER_PATH, SWITCH_DISCOVERY_TIMEOUT,
+from .config import (VERSION, INTERFACE, WIFI_INTERFACE, CARRIER_PATH, SWITCH_DISCOVERY_TIMEOUT, SWITCH_QUICK_CHECK,
                      BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger)
 from .history import HistoryScreens, save_scan_record, now_stamp, is_clock_synced, format_stamp
 from .wifi import WifiScreens
 from .graph import MetricsGraph
 from .speed import get_ip, link_speed, read_number, run_ping_test, run_bandwidth_test
-from .switch import query_lldpd, parse_switch_topology, start_cdp_listener
+from .switch import query_lldpd, parse_switch_topology, start_cdp_listener, start_switch_frame_listener, stop_listener
 
 # same size as the Pi's TFT so a VM window looks like the real screen
 WINDOW_SIZE = "480x320"
@@ -23,7 +23,8 @@ SCAN_STEPS = ["Switch", "DNS", "Ping", "Speed"]
 
 # which tab each screen belongs to
 VIEW_TAB = {"scanner": "cable", "results": "cable", "cable_speed": "cable", "wifi": "wifi", "ap": "wifi",
-            "wifi_speed": "wifi", "history": "history", "detail": "history"}
+            "wifi_speed": "wifi", "history": "history", "detail": "history",
+            "share_cable": "cable", "share_history": "history"}
 
 
 # blank scan record. "--" while waiting, then each test starts as "Failed" until it passes
@@ -65,13 +66,20 @@ def short_link(text):
     return short + (" half" if "half" in text else "")
 
 
+# QR code size on the Send to phone screen (pixels)
+QR_SIZE = 200
+
+# shown as the switch name when it's plugged into a router / unmanaged switch
+NO_SWITCH = "No managed switch"
+
+
 # the coloured row at the top of the results: [(text, colour), ...]
 def scan_summary(results):
     link = results.get("link_speed", "--")
     speed = read_number(link)
     link_color = GOOD if speed is None or (speed >= 1000 and "half" not in link) else OK
 
-    found = results.get("switch_name") not in ("Not Found", "--", None)
+    found = results.get("switch_name") not in ("Not Found", "--", None, NO_SWITCH)
     dns_ok = "ms" in str(results.get("dns_time"))
 
     down = read_number(results.get("speed_down"))
@@ -172,8 +180,10 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.build_wifi_ui()
         self.build_ap_ui()
         self.build_wifi_speed_ui()
+        self.build_share_ui()
         self.frames = [self.scanner_frame, self.results_frame, self.cable_speed_frame, self.history_frame,
-                       self.detail_frame, self.wifi_frame, self.ap_frame, self.wifi_speed_frame]
+                       self.detail_frame, self.wifi_frame, self.ap_frame, self.wifi_speed_frame,
+                       self.share_frame]
         self.scroll_canvases = {"results": self.scroll_canvas, "cable_speed": self.cable_speed_canvas,
                                 "detail": self.detail_canvas,
                                 "wifi": self.wifi_canvas, "ap": self.ap_canvas,
@@ -294,9 +304,11 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
         # what ping prints while the ping step runs, last few lines
         self.ping_lines = []
-        self.ping_log = tk.Label(self.scanner_frame, text="", font=("DejaVu Sans Mono", 9), bg=BG, fg=MUTED,
-                                 justify=tk.LEFT, anchor="w")
-        self.ping_log.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=6)
+        # anchor center = the block of lines sits in the middle, justify left = lines still line up
+        self.ping_log = tk.Label(self.scanner_frame, text="", font=("DejaVu Sans Mono", 12), bg=BG, fg=MUTED,
+                                 justify=tk.LEFT, anchor="center")
+        # fills the space under the step row, so the lines sit in the middle of it
+        self.ping_log.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=6)
 
     def build_results_ui(self):
         # Results | Speed, same idea as Networks | Speed on the Wi-Fi tab
@@ -329,6 +341,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.lbl_tested.pack(side=tk.LEFT)
         self.rescan_button = self.make_button(when, "↻ Rescan", self.rescan_pressed, size=11)
         self.rescan_button.pack(side=tk.RIGHT)
+        # send this scan to a phone as a PDF (share.py)
+        self.make_button(when, "QR", lambda: self.open_share(self.scan_results, "results"),
+                         size=11).pack(side=tk.RIGHT, padx=4)
 
         switch = self.make_card(self.scroll_content, "Switch")
         self.res_switch = self.make_row(switch, "Switch")
@@ -380,6 +395,71 @@ class FlukeApp(HistoryScreens, WifiScreens):
     def disarm_exit(self):
         self.exit_armed = False
         self.exit_button.config(text=" ✕ ", bg=BAR_BG, fg=BAD)
+
+    # --- SEND TO PHONE (QR code -> PDF, see share.py) ---
+
+    def build_share_ui(self):
+        self.share_frame = tk.Frame(self.container, bg=BG)
+        self.make_header(self.share_frame, "Send to phone", back=self.close_share)
+        body = tk.Frame(self.share_frame, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        # QR on the left, what to do on the right
+        self.qr_canvas = tk.Canvas(body, width=QR_SIZE, height=QR_SIZE, bg="white", highlightthickness=0)
+        self.qr_canvas.pack(side=tk.LEFT)
+        self.share_lbl = tk.Label(body, text="", font=("Helvetica", 11), bg=BG, fg=TEXT,
+                                  justify=tk.LEFT, anchor="nw", wraplength=190)
+        self.share_lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
+
+    # record = the scan to send, came_from = "results" or "detail" (where Back goes)
+    def open_share(self, record, came_from):
+        self.share_came_from = came_from
+        view = "share_cable" if came_from == "results" else "share_history"
+        self.qr_canvas.delete("all")
+        self.share_lbl.config(text="Making the PDF...", fg=TEXT)
+        self.show_frame(self.share_frame, view)
+        # the PDF takes a second, so make it off the screen thread
+        threading.Thread(target=self.make_share, args=(dict(record),), daemon=True).start()
+
+    def make_share(self, record):
+        from .share import share_record, qr_matrix
+        try:
+            url, interface = share_record(record)
+            matrix = qr_matrix(url)
+        except ImportError:
+            logger.exception("QR package missing")
+            self.root.after(0, self.share_failed, "The QR package is missing. Run  notafluke  once over SSH to install it.")
+            return
+        except Exception as err:
+            logger.exception("could not share the scan")
+            self.root.after(0, self.share_failed, f"Couldn't make the PDF: {err}")
+            return
+        self.root.after(0, self.show_share, url, interface, matrix)
+
+    def show_share(self, url, interface, matrix):
+        self.qr_canvas.delete("all")
+        cell = QR_SIZE // len(matrix)
+        offset = (QR_SIZE - cell * len(matrix)) // 2
+        for row_number, row in enumerate(matrix):
+            for column_number, black in enumerate(row):
+                if black:
+                    x = offset + column_number * cell
+                    y = offset + row_number * cell
+                    self.qr_canvas.create_rectangle(x, y, x + cell, y + cell, fill="black", outline="")
+        network = "Wi-Fi" if interface == WIFI_INTERFACE else "the cable's network"
+        self.share_lbl.config(fg=TEXT, text=(
+            "Scan with your phone camera to open the PDF report.\n\n"
+            f"Your phone needs to be on the same network as the Pi ({network}).\n\n"
+            f"{url}"))
+
+    def share_failed(self, message):
+        self.qr_canvas.delete("all")
+        self.share_lbl.config(text=message, fg=BAD)
+
+    def close_share(self):
+        if self.share_came_from == "results":
+            self.show_cable_results()
+        else:
+            self.show_frame(self.detail_frame, "detail")
 
     # start a new scan without unplugging the cable
     def rescan_pressed(self):
@@ -524,12 +604,12 @@ class FlukeApp(HistoryScreens, WifiScreens):
     def stop_loading_animation(self):
         self.progress_bar.stop()
         self.loading_frame.pack_forget()
-        self.timer_label.pack(pady=10)
+        self.timer_label.pack(pady=10, before=self.ping_log)
 
     # newest line goes at the bottom, older ones scroll off the top
     def add_ping_line(self, line):
-        line = re.sub(r"^\d+ bytes from |, time \d+ms$", "", line)[:56]   # fit the small screen
-        self.ping_lines = (self.ping_lines + [line])[-5:]
+        line = re.sub(r"^\d+ bytes from |, time \d+ms$", "", line)[:44]   # fit the small screen
+        self.ping_lines = (self.ping_lines + [line])[-8:]   # 8 lines fill the space under the steps
         self.ping_log.config(text="\n".join(self.ping_lines))
 
     # step = index in SCAN_STEPS that's running now (-1 = waiting, 4 = all done)
@@ -537,6 +617,11 @@ class FlukeApp(HistoryScreens, WifiScreens):
         if step != 2:     # the ping output only shows during the ping step
             self.ping_lines = []
             self.ping_log.config(text="")
+        # the timer is blank while pinging, so hide it and let the ping lines sit in the middle
+        if step == 2:
+            self.timer_label.pack_forget()
+        elif not self.timer_label.winfo_manager():
+            self.timer_label.pack(pady=2, before=self.ping_log)
         self.status_label.config(text=status, fg=status_color)
         for k, label in enumerate(self.step_labels):
             if k < step:
@@ -583,11 +668,31 @@ class FlukeApp(HistoryScreens, WifiScreens):
             seconds_left = seconds_left - 1
 
     # check lldpd once a second (switch.py). it's always running so usually the
-    # first check already has data. returns False on timeout or cable pulled
+    # first check already has data. returns False on timeout or cable pulled.
+    # if no switch frames at all (STP/CDP/LLDP) show up in SWITCH_QUICK_CHECK seconds, it's
+    # plugged into a router or unmanaged switch, so stop early instead of waiting 35s
     def discover_switch_topology(self):
+        self.heard_switch_frames = False
+        listener = start_switch_frame_listener(self.set_heard_switch_frames)
+        try:
+            return self.wait_for_switch(listener is not None)
+        finally:
+            stop_listener(listener)
+
+    def set_heard_switch_frames(self):
+        self.heard_switch_frames = True
+
+    def wait_for_switch(self, can_skip):
         seconds_left = SWITCH_DISCOVERY_TIMEOUT
         while seconds_left >= 0:
             if not self.is_cable_connected():
+                return False
+
+            waited = SWITCH_DISCOVERY_TIMEOUT - seconds_left
+            if can_skip and waited >= SWITCH_QUICK_CHECK and not self.heard_switch_frames:
+                logger.info("no STP/CDP/LLDP in %ds - not a managed switch, skipping the wait", waited)
+                self.scan_results["switch_name"] = NO_SWITCH
+                self.scan_results["switch_port"] = "--"
                 return False
 
             minutes = seconds_left // 60
