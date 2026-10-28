@@ -216,6 +216,12 @@ class ShareTests(unittest.TestCase):
         self.assertIn("DOWN 93.4", text)
         self.assertLess(len(text), 250)
 
+    def test_email_link_is_a_mailto_with_the_results(self):
+        link = share.scan_email_link(self.RECORD)
+        self.assertTrue(link.startswith("mailto:?body="))
+        self.assertIn("SW-01", link)
+        self.assertNotIn(" ", link)     # spaces have to be encoded or phones won't open it
+
     def test_qr_matrix_is_square(self):
         try:
             matrix = share.qr_matrix("http://192.168.8.159:8080/scan.pdf")

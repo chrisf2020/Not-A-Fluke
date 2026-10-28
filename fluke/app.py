@@ -401,9 +401,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
     def build_share_ui(self):
         self.share_frame = tk.Frame(self.container, bg=BG)
         bar = self.make_header(self.share_frame, "Send to phone", back=self.close_share)
-        # PDF = link to a PDF (same network), Text = the scan itself in the QR (no network needed)
+        # PDF = link to a PDF (same network), Email = the scan as an email draft (no network needed)
         self.share_mode_buttons = {}
-        for mode in ("Text", "PDF"):
+        for mode in ("Email", "PDF"):
             button = tk.Button(bar, text=mode, command=lambda m=mode: self.set_share_mode(m),
                                font=("Helvetica", 11, "bold"), relief=tk.FLAT, bd=0, padx=10, pady=2,
                                bg=BAR_BG, fg=TEXT, activebackground=ACCENT, highlightthickness=0)
@@ -432,8 +432,8 @@ class FlukeApp(HistoryScreens, WifiScreens):
             on = name == mode
             button.config(bg=ACCENT if on else BAR_BG, fg="#000000" if on else TEXT)
         self.qr_canvas.delete("all")
-        if mode == "Text":
-            self.show_text_share()
+        if mode == "Email":
+            self.show_email_share()
             return
         self.share_lbl.config(text="Making the PDF...", fg=TEXT)
         # the PDF takes a second, so make it off the screen thread
@@ -451,7 +451,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
         except Exception as err:
             logger.exception("could not share the scan as a PDF")
             # no network to share it on (no IP etc.): the text QR still works
-            self.root.after(0, self.share_failed, f"No PDF: {err}.\n\nShowing the Text QR instead, it works without a network.", True)
+            self.root.after(0, self.share_failed, f"No PDF: {err}.\n\nShowing the Email QR instead, it works without a network.", True)
             return
         self.root.after(0, self.show_share, url, interface, matrix)
 
@@ -462,22 +462,21 @@ class FlukeApp(HistoryScreens, WifiScreens):
         network = "Wi-Fi" if interface == WIFI_INTERFACE else "the cable's network"
         self.share_lbl.config(fg=TEXT, text=(
             "Scan with your phone camera to open the PDF.\n\n"
-            f"Your phone needs to be on the same network as the Pi ({network}). "
-            "Not on it? Tap Text.\n\n"
-            f"{url}"))
+            "If it says the connection isn't private: Show Details, then visit this website.\n\n"
+            f"Phone must be on the Pi's network ({network}). Not on it? Tap Email."))
 
-    def show_text_share(self):
-        from .share import scan_text, qr_matrix
+    def show_email_share(self):
+        from .share import scan_email_link, qr_matrix
         try:
             # L = least error correction, so the squares stay as big as possible
-            self.draw_qr(qr_matrix(scan_text(self.share_record), error_correction="L"))
+            self.draw_qr(qr_matrix(scan_email_link(self.share_record), error_correction="L"))
         except ImportError:
             self.share_failed("The QR package is missing. Run  notafluke  once over SSH to install it.")
             return
         self.share_lbl.config(fg=TEXT, text=(
-            "Scan with your phone camera. The scan results show up as text, "
-            "no Wi-Fi or data needed.\n\n"
-            "Copy it, save it as a note, or text it to someone."))
+            "Scan with your phone camera. Your mail app opens a new email with the "
+            "results typed in - no Wi-Fi needed to scan it.\n\n"
+            "Send it to yourself, or save it as a draft."))
 
     # black squares on the white canvas, as big as fit
     def draw_qr(self, matrix):
@@ -494,7 +493,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
     def share_failed(self, message, use_text=False):
         if use_text and self.share_mode == "PDF":
-            self.set_share_mode("Text")
+            self.set_share_mode("Email")
             self.share_lbl.config(text=message + "\n\n" + self.share_lbl.cget("text"), fg=TEXT)
             return
         self.qr_canvas.delete("all")

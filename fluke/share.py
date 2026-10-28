@@ -1,11 +1,15 @@
 # send a scan to your phone, two ways:
 #   PDF:  makes a PDF report, serves it from a tiny web server on the Pi, and the QR code is a
 #         link to it. The phone has to be on the same network as the Pi.
-#   Text: the QR code holds the scan itself as text. Works with no network at all, the phone
-#         camera just shows the text (copy it, save it as a note, text it to someone).
+#   Email: the QR code holds the scan itself as an email draft (a mailto: link). Works with no
+#         network at all: the phone opens its mail app with the results already typed in.
+#         (Plain text in a QR just gets Googled by the iPhone camera, so it has to be a link.)
 
 import os
+import ssl
+import subprocess
 import threading
+import urllib.parse
 from functools import partial
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
@@ -19,6 +23,12 @@ REPORT_DIR = os.path.join(LOG_DIR, "reports")
 # attempt hits this plain web server and the page just fails to load.
 SHARE_PORT = 80
 BACKUP_PORT = 8080      # used if something else already has port 80
+# iPhones (and Chrome with "always use secure connections") only try https and don't fall back,
+# so we answer on 443 too. There's no real certificate for a local IP, so the phone warns once:
+# tap Show Details -> visit this website
+SECURE_PORT = 443
+CERT_FILE = os.path.join(LOG_DIR, "share-cert.pem")
+KEY_FILE = os.path.join(LOG_DIR, "share-key.pem")
 MAX_REPORTS = 20        # older PDFs get deleted so the SD card doesn't fill up
 
 # letter size page at 150 dpi
@@ -28,6 +38,7 @@ MARGIN = 90
 FONT_DIR = "/usr/share/fonts/truetype/dejavu"
 
 _server = None
+_secure_server = None
 
 
 # e.g. scan-2026-10-28_12-59-29.pdf
@@ -96,7 +107,32 @@ def start_server():
     threading.Thread(target=_server.serve_forever, daemon=True).start()
     port = _server.server_address[1]
     logger.info("report server running on port %d", port)
+    start_secure_server(handler)
     return port
+
+
+# makes a self-signed certificate the first time (good for 10 years)
+def make_certificate():
+    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+        return
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
+                    "-subj", "/CN=Not-A-Fluke", "-keyout", KEY_FILE, "-out", CERT_FILE],
+                   capture_output=True, check=True, timeout=60)
+
+
+# the same files over https on port 443. If it can't start, plain http still works
+def start_secure_server(handler):
+    global _secure_server
+    try:
+        make_certificate()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(CERT_FILE, KEY_FILE)
+        _secure_server = ThreadingHTTPServer(("0.0.0.0", SECURE_PORT), handler)
+        _secure_server.socket = context.wrap_socket(_secure_server.socket, server_side=True)
+        threading.Thread(target=_secure_server.serve_forever, daemon=True).start()
+        logger.info("report server also on https port %d", SECURE_PORT)
+    except Exception:
+        logger.exception("could not start the https report server (http still works)")
 
 
 # the Pi's address the phone can reach: its Wi-Fi first (phones are usually on Wi-Fi),
@@ -146,6 +182,11 @@ def scan_text(record):
         f"DNS {get('dns_server')} {get('dns_time')}",
     ]
     return "\n".join(lines)
+
+
+# the scan as an email draft link. No "to" address, you pick who it goes to (or send it to yourself)
+def scan_email_link(record):
+    return "mailto:?body=" + urllib.parse.quote(scan_text(record))
 
 
 # QR code as rows of True (black) / False (white) squares, quiet border included
