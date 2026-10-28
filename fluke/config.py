@@ -33,6 +33,9 @@ CARRIER_PATH = f"/sys/class/net/{INTERFACE}/carrier"
 
 # 35s covers LLDP's 30s cycle. CDP is every ~60s so a new link might need a replug
 SWITCH_DISCOVERY_TIMEOUT = 35
+# managed switches send STP every 2s (and CDP/LLDP). If none of that shows up in this many
+# seconds it's a router / unmanaged switch (like a GL.iNet), so don't wait the full 35s
+SWITCH_QUICK_CHECK = 6
 
 LOG_DIR = "/var/log/fluke-gui"
 SCAN_LOG_PATH = os.path.join(LOG_DIR, "scans.jsonl")
