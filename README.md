@@ -16,8 +16,6 @@ A touchscreen network tester for the Raspberry Pi. It does the same job as a Flu
 | `notafluke install` | install everything (first time on a new Pi or VM) |
 | `notafluke autostart on/off` | start the GUI when the Pi boots, or don't |
 
-Don't run the Python file with `sudo python3 ...`. Use `notafluke`, it sorts out sudo and the display. Running Python directly over SSH gives the `no display name and no $DISPLAY environment variable` error.
-
 ## Files
 
 | File | What's in it |
