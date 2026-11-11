@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from fluke import config, history, speed, switch, wifi
+from fluke import config, graph, history, share, speed, switch, wifi
 
 IW_SCAN = """BSS 18:60:41:57:46:56(on wlan0) -- associated
 \tfreq: 2437.0
@@ -21,6 +21,28 @@ BSS aa:bb:cc:dd:ee:ff(on wlan0)
 \tBSS Load:
 \t\t * station count: 3
 \t\t * channel utilisation: 51/255
+"""
+
+IW_SCAN_WIDE = """BSS 11:22:33:44:55:66(on wlan0)
+\tfreq: 5180
+\tsignal: -55.00 dBm
+\tSSID: Office5G
+\tHT operation:
+\t\t * primary channel: 36
+\t\t * secondary channel offset: above
+\t\t * STA channel width: any
+\tVHT operation:
+\t\t * channel width: 1 (80 MHz)
+\t\t * center freq segment 1: 42
+\t\t * center freq segment 2: 0
+BSS 66:55:44:33:22:11(on wlan0)
+\tfreq: 2462
+\tsignal: -70.00 dBm
+\tSSID: Garage
+\tHT operation:
+\t\t * primary channel: 11
+\t\t * secondary channel offset: below
+\t\t * STA channel width: any
 """
 
 PING = """64 bytes from 1.1.1.1: icmp_seq=1 ttl=57 time=10.0 ms
@@ -52,6 +74,12 @@ class WifiTests(unittest.TestCase):
         self.assertEqual((home["security"], home["standard"], home["connected"]), ("WPA2/3", "Wi-Fi 5 (ac)", True))
         self.assertEqual((hidden["ssid"], hidden["channel"], hidden["clients"], hidden["busy"]), ("<hidden>", 36, "3", "20%"))
 
+    def test_ap_center(self):
+        wide, garage = wifi.parse_iw_scan(IW_SCAN_WIDE)
+        self.assertEqual((wide["width"], wide["center"]), ("80 MHz", 5210))
+        self.assertEqual((garage["width"], garage["center"]), ("40 MHz", 2452))
+        self.assertEqual(wifi.parse_iw_scan(IW_SCAN)[0]["center"], 2437)
+
     def test_parse_iw_link(self):
         self.assertIsNone(wifi.parse_iw_link("Not connected."))
         link = wifi.parse_iw_link("Connected to 18:60:41:57:46:56 (on wlan0)\n\tSSID: HomeNet\n\tsignal: -52 dBm\n")
@@ -66,6 +94,40 @@ class WifiTests(unittest.TestCase):
     def test_signal_words(self):
         self.assertEqual([wifi.signal_level(d) for d in (-45, -65, -75, -90)], [3, 2, 1, 0])
         self.assertEqual(wifi.signal_bars(-65), "▂▄▆ ")
+
+
+class ChannelGraphTests(unittest.TestCase):
+    APS = [
+        {"ssid": "Weak", "freq": 2462, "signal": -85, "width": "20 MHz", "connected": False},
+        {"ssid": "Strong", "freq": 2412, "signal": -40, "width": "40 MHz", "connected": True},
+        {"ssid": "FiveGig", "freq": 5180, "signal": -60, "width": "80 MHz", "connected": False},
+    ]
+
+    def test_band_filter(self):
+        self.assertEqual([ap["ssid"] for ap in graph.band_aps(self.APS, "2.4")], ["Strong", "Weak"])
+        self.assertEqual([ap["ssid"] for ap in graph.band_aps(self.APS, "5")], ["FiveGig"])
+
+    def test_width_and_channel_freq(self):
+        self.assertEqual([graph.width_mhz(t) for t in ("20 MHz", "160 MHz", "", None)], [20, 160, 20, 20])
+        self.assertEqual([graph.channel_freq(c, "2.4") for c in (1, 6, 14)], [2412, 2437, 2484])
+        self.assertEqual([graph.channel_freq(c, "5") for c in (36, 165)], [5180, 5825])
+
+    def test_signal_y(self):
+        self.assertEqual(graph.signal_y(-30, 10, 110), 10)
+        self.assertEqual(graph.signal_y(-100, 10, 110), 110)
+        self.assertEqual(graph.signal_y(-20, 10, 110), 10)          #too strong, clamped to the top
+        self.assertEqual(graph.signal_y(-130, 10, 110), 110)        #too weak, clamped to the bottom
+
+    def test_arch_points(self):
+        points = graph.arch_points(100, 20, 30, 120, steps=2)
+        self.assertEqual(points, [70, 120, 85, 45, 100, 20, 115, 45, 130, 120])
+
+    def test_clip_x(self):
+        self.assertEqual(graph.clip_x([5, 10, 50, 20, 300, 30], 20, 200), [20, 10, 50, 20, 200, 30])
+
+    def test_short_name(self):
+        self.assertEqual(graph.short_name("HomeNet"), "HomeNet")
+        self.assertEqual(graph.short_name("A very long network name"), "A very long…")
 
 
 class SpeedTests(unittest.TestCase):
@@ -187,6 +249,9 @@ class ScreenTests(unittest.TestCase):
             app.show_wifi_frame()
             app.show_wifi_results(wifi.parse_iw_scan(IW_SCAN))
             app.show_ap_info(wifi.parse_iw_scan(IW_SCAN)[0])
+            app.open_wifi_channels()
+            app.toggle_channel_band()
+            app.toggle_channel_band()
             app.show_frame(app.wifi_speed_frame, "wifi_speed")
             app.finish_wifi_speed_test({"speed_down": "50 Mbps"}, {"down": [1, 2, 3], "up": []})
             app.rescan_pressed()
@@ -195,6 +260,48 @@ class ScreenTests(unittest.TestCase):
             self.assertEqual(app.current_view, "wifi_speed")
         finally:
             root.destroy()
+
+
+class ShareTests(unittest.TestCase):
+    RECORD = {"started_at": "2026-10-28T12:59:29", "switch_name": "SW-01", "speed_down": "93.4 Mbps"}
+
+    def test_report_filename_has_no_colons(self):
+        self.assertEqual(share.report_filename(self.RECORD), "scan-2026-10-28_12-59-29.pdf")
+
+    def test_build_pdf_makes_a_pdf(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "report.pdf")
+            share.build_pdf(self.RECORD, path)
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(4), b"%PDF")
+
+    def test_qr_matrix_is_square(self):
+        try:
+            matrix = share.qr_matrix("http://192.168.8.159:8080/scan.pdf")
+        except ImportError:
+            self.skipTest("python3-qrcode not installed")
+        self.assertGreater(len(matrix), 20)
+        self.assertEqual(len(matrix), len(matrix[0]))
+
+
+class DnsTests(unittest.TestCase):
+    def packet(self, source, name):
+        from scapy.layers.inet import IP, UDP
+        from scapy.layers.dns import DNS, DNSQR
+        return IP(src=source, dst="192.168.8.1") / UDP(dport=53) / DNS(rd=1, qd=DNSQR(qname=name))
+
+    def test_pi_background_lookups_are_ignored(self):
+        from fluke import dns
+        results = {"dns_queries": 0, "dns_last_domain": "None"}
+        dns.count_dns_question(results, self.packet("192.168.8.159", "api.anthropic.com"), "192.168.8.159")
+        dns.count_dns_question(results, self.packet("192.168.8.159", "google.com"), "192.168.8.159")
+        self.assertEqual(results, {"dns_queries": 1, "dns_last_domain": "google.com"})
+
+    def test_other_devices_lookups_count(self):
+        from fluke import dns
+        results = {"dns_queries": 0, "dns_last_domain": "None"}
+        dns.count_dns_question(results, self.packet("192.168.8.142", "apple.com"), "192.168.8.159")
+        self.assertEqual(results["dns_last_domain"], "apple.com")
 
 
 if __name__ == "__main__":

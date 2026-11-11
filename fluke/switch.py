@@ -111,3 +111,40 @@ def start_cdp_listener(on_poe, interface=INTERFACE):
     except Exception:
         logger.exception("could not start the CDP listener (PoE check)")
         return None
+
+
+# listens for the frames a managed switch sends: STP (every 2s), CDP and LLDP. Skips the Pi's
+# own frames (lldpd sends LLDP out of this port too). on_heard() is called on the first one.
+# Routers and unmanaged switches (GL.iNet etc.) send none of these.
+SWITCH_FRAMES = ("ether dst 01:80:c2:00:00:00 or ether dst 01:00:0c:cc:cc:cd"    # STP, Cisco PVST
+                 " or ether dst 01:00:0c:cc:cc:cc or ether dst 01:80:c2:00:00:0e")  # CDP, LLDP
+
+
+def start_switch_frame_listener(on_heard, interface=INTERFACE):
+    try:
+        with open(f"/sys/class/net/{interface}/address") as f:
+            own_mac = f.read().strip()
+        import threading
+        from scapy.all import AsyncSniffer
+        ready = threading.Event()
+        sniffer = AsyncSniffer(
+            iface=interface, filter=f"({SWITCH_FRAMES}) and not ether src {own_mac}",
+            prn=lambda packet: on_heard(), store=False, started_callback=ready.set
+        )
+        sniffer.start()
+        # stopping it before it's really listening throws, so wait until it is
+        ready.wait(timeout=5)
+        return sniffer
+    except Exception:
+        logger.exception("could not start the switch frame listener")
+        return None
+
+
+# stops a listener from start_switch_frame_listener (never throws)
+def stop_listener(sniffer):
+    if sniffer is None:
+        return
+    try:
+        sniffer.stop()
+    except Exception:
+        logger.exception("could not stop the switch frame listener")

@@ -1,4 +1,4 @@
-# scan history: saves each scan to /var/log/fluke-gui/scans.jsonl (newest 500 kept)
+# scan history: saves each scan to /var/log/fluke-gui/scans.jsonl (newest 5 pages = 30 kept)
 # plus the History / Scan Detail screens
 
 import os
@@ -183,7 +183,10 @@ class HistoryScreens:
 
     def build_detail_ui(self):
         self.detail_frame = tk.Frame(self.container, bg=BG)
-        self.make_header(self.detail_frame, "Scan detail", back=self.show_history_frame)
+        bar = self.make_header(self.detail_frame, "Scan detail", back=self.show_history_frame)
+        # send this scan to a phone as a PDF (share.py)
+        self.make_button(bar, "QR", lambda: self.open_share(self.detail_record, "detail"),
+                         size=11).pack(side=tk.RIGHT, padx=6)
 
         # scrollable since a full scan doesn't fit on screen
         self.detail_canvas, detail_inner = self.make_scroll_area(self.detail_frame)
@@ -195,7 +198,7 @@ class HistoryScreens:
 
     # reload from disk and go to page 1
     def open_history(self):
-        self.history_records = load_scan_history()
+        self.history_records = load_scan_history()[:MAX_SCAN_RECORDS]
         self.history_page = 0
         self.render_history_page()
         self.show_history_frame()
@@ -226,7 +229,7 @@ class HistoryScreens:
                 command=lambda r=record: self.show_detail_ui(r)
             ).pack(fill=tk.X, pady=2)
 
-        self.history_page_lbl.config(text=f"Page {self.history_page + 1} / {pages}  (! = cut short)")
+        self.history_page_lbl.config(text=f"Page {self.history_page + 1} / {pages}")
 
     def history_newer(self):
         if self.history_page > 0:
@@ -239,6 +242,7 @@ class HistoryScreens:
             self.render_history_page()
 
     def show_detail_ui(self, record):
+        self.detail_record = record
         self.detail_lbl.config(text=format_record_detail(record))
         self.show_frame(self.detail_frame, "detail")
         self.detail_canvas.yview_moveto(0)

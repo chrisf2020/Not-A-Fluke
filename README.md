@@ -1,6 +1,6 @@
 # Not-A-Fluke
 
-A touchscreen network tester for the Raspberry Pi. Plug it into an Ethernet drop and it shows the switch, port, VLAN and PoE (from CDP/LLDP), checks DNS, measures latency, jitter and packet loss, and runs a speed test with a speed graph. The Wi-Fi tab scans nearby access points and runs the same speed test over Wi-Fi.
+A touchscreen network tester for the Raspberry Pi. It does the same job as a Fluke network tester at a much, much lower price.
 
 ## Commands
 
@@ -16,8 +16,6 @@ A touchscreen network tester for the Raspberry Pi. Plug it into an Ethernet drop
 | `notafluke install` | install everything (first time on a new Pi or VM) |
 | `notafluke autostart on/off` | start the GUI when the Pi boots, or don't |
 
-Don't run the Python file with `sudo python3 ...`. Use `notafluke`, it sorts out sudo and the display. Running Python directly over SSH gives the `no display name and no $DISPLAY environment variable` error.
-
 ## Files
 
 | File | What's in it |
@@ -29,9 +27,10 @@ Don't run the Python file with `sudo python3 ...`. Use `notafluke`, it sorts out
 | `fluke/wifi.py` | Wi-Fi scanner, AP info, Wi-Fi speed test |
 | `fluke/history.py` | scan log and History screen |
 | `fluke/switch.py` | CDP/LLDP (via lldpd) and PoE |
+| `fluke/share.py` | QR code + PDF report for your phone |
 | `fluke/dns.py` | DNS test |
 | `fluke/speed.py` | speed test, ping stats, quality score |
-| `fluke/graph.py` | the speed graph (Cable and Wi-Fi tabs) |
+| `fluke/graph.py` | the speed graph (Cable and Wi-Fi tabs) and the Wi-Fi channel map |
 | `fluke/config.py` | version, ports, log paths, colours |
 | `tests/` | tests (`notafluke test`) |
 
