@@ -10,7 +10,7 @@ import tkinter as tk
 from datetime import datetime
 
 from .config import WIFI_INTERFACE, BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger
-from .graph import MetricsGraph
+from .graph import MetricsGraph, ChannelGraph, band_aps
 from .speed import get_ip, route_interface, run_ping_test, run_bandwidth_test, speed_test_lock
 
 
@@ -27,6 +27,20 @@ def freq_to_channel(freq):
     if 5925 <= freq <= 7125:
         return (freq - 5950) // 5
     return 0
+
+
+# middle of the AP's whole channel in MHz. freq is only the primary 20 MHz channel, a 40 or 80 MHz
+# AP is centred somewhere else (the channel map needs the middle to draw the arch in the right place)
+def ap_center_freq(ap):
+    width = int(re.match(r"\d+", ap["width"]).group())
+    if width >= 80 and ap.get("segment1", 0) > 0 and ap["freq"] < 5925:
+        segment = ap.get("segment2", 0) if width == 160 and ap.get("segment2", 0) > 0 else ap["segment1"]
+        return 5000 + 5 * segment
+    if width == 40 and ap.get("offset") == "above":
+        return ap["freq"] + 10
+    if width == 40 and ap.get("offset") == "below":
+        return ap["freq"] - 10
+    return ap["freq"]
 
 
 # parses "iw dev wlan0 scan" output into a list of AP dicts
@@ -78,6 +92,12 @@ def parse_iw_scan(text):
             width = re.search(r"\((.*MHz)\)", line)
             if width:
                 ap["width"] = width.group(1)
+        elif "secondary channel offset:" in line:
+            ap["offset"] = line.split(":")[1].strip()
+        elif "center freq segment 1:" in line:
+            ap["segment1"] = int(line.split(":")[1])
+        elif "center freq segment 2:" in line:
+            ap["segment2"] = int(line.split(":")[1])
         elif line.startswith("HT capabilities") and ap["standard"] == "a/b/g":
             ap["standard"] = "Wi-Fi 4 (n)"
         elif line.startswith("VHT capabilities"):
@@ -86,6 +106,12 @@ def parse_iw_scan(text):
             ap["standard"] = "Wi-Fi 6 (ax)"
         elif line.startswith("EHT capabilities"):
             ap["standard"] = "Wi-Fi 7 (be)"
+
+    for ap in access_points:
+        # HT only says "secondary channel offset: above/below" for a 40 MHz AP, never the width
+        if ap["width"] == "20 MHz" and ap.get("offset") in ("above", "below"):
+            ap["width"] = "40 MHz"
+        ap["center"] = ap_center_freq(ap)
 
     # SAE is WPA3, lots of APs offer both
     for ap in access_points:
@@ -219,11 +245,15 @@ def ap_detail_rows(ap):
 
 class WifiScreens:
 
+    # the three buttons along the top of every Wi-Fi screen
+    def wifi_tabs(self):
+        return [("Networks", self.show_wifi_frame), ("Channels", self.open_wifi_channels), ("Speed", self.open_wifi_speed)]
+
     # list of nearby networks, strongest first
     def build_wifi_ui(self):
         self.wifi_scanning = False
         self.wifi_frame = tk.Frame(self.container, bg=BG)
-        self.make_switcher(self.wifi_frame, [("Networks", self.show_wifi_frame), ("Speed", self.open_wifi_speed)], "Networks")
+        self.make_switcher(self.wifi_frame, self.wifi_tabs(), "Networks")
 
         top = tk.Frame(self.wifi_frame, bg=BG)
         top.pack(fill=tk.X, padx=8)
@@ -233,6 +263,25 @@ class WifiScreens:
         self.wifi_scan_button.pack(side=tk.RIGHT, pady=2)
 
         self.wifi_canvas, self.wifi_rows = self.make_scroll_area(self.wifi_frame)
+
+    # channel map: every nearby AP drawn as an arch on its channel, one band at a time
+    def build_wifi_channels_ui(self):
+        self.wifi_aps = []
+        self.channel_band = "2.4"
+        self.channels_frame = tk.Frame(self.container, bg=BG)
+        self.make_switcher(self.channels_frame, self.wifi_tabs(), "Channels")
+
+        top = tk.Frame(self.channels_frame, bg=BG)
+        top.pack(fill=tk.X, padx=8)
+        self.channels_status_lbl = tk.Label(top, text="", font=("Helvetica", 10), bg=BG, fg=MUTED)
+        self.channels_status_lbl.pack(side=tk.LEFT)
+        self.channels_scan_button = self.make_button(top, "↻ Scan", self.start_wifi_scan, size=11)
+        self.channels_scan_button.pack(side=tk.RIGHT, pady=2)
+        self.channels_band_button = self.make_button(top, "2.4 GHz", self.toggle_channel_band, size=11)
+        self.channels_band_button.pack(side=tk.RIGHT, padx=4, pady=2)
+
+        self.channel_graph = ChannelGraph(self.channels_frame)
+        self.channel_graph.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 4))
 
     # shown when a network is tapped
     def build_ap_ui(self):
@@ -247,7 +296,7 @@ class WifiScreens:
         self.wifi_speed_running = False
         self.wifi_speed_done = False
         self.wifi_speed_frame = tk.Frame(self.container, bg=BG)
-        self.make_switcher(self.wifi_speed_frame, [("Networks", self.show_wifi_frame), ("Speed", self.open_wifi_speed)], "Speed")
+        self.make_switcher(self.wifi_speed_frame, self.wifi_tabs(), "Speed")
 
         top = tk.Frame(self.wifi_speed_frame, bg=BG)
         top.pack(fill=tk.X, padx=8)
@@ -263,7 +312,7 @@ class WifiScreens:
         self.wifi_graph.canvas.pack(fill=tk.X, padx=4, pady=4)
 
     def open_wifi(self):
-        if self.current_view == "wifi_speed":
+        if self.current_view in ("wifi_speed", "channels"):
             return
         self.show_wifi_frame()
         self.start_wifi_scan()
@@ -271,16 +320,39 @@ class WifiScreens:
     def show_wifi_frame(self):
         self.show_frame(self.wifi_frame, "wifi")
 
+    # Channels button: shows the last scan, or scans if there hasn't been one yet
+    def open_wifi_channels(self):
+        self.show_frame(self.channels_frame, "channels")
+        if len(self.wifi_aps) == 0 and not self.wifi_scanning:
+            self.start_wifi_scan()
+
+    # flips the channel map between 2.4 GHz and 5 GHz
+    def toggle_channel_band(self):
+        self.channel_band = "5" if self.channel_band == "2.4" else "2.4"
+        self.channels_band_button.config(text=f"{self.channel_band} GHz")
+        self.update_channel_status()
+        self.channel_graph.show(self.wifi_aps, self.channel_band)
+
+    # "4 on 2.4 GHz at 12:24 PM" under the Channels tab
+    def update_channel_status(self):
+        if len(self.wifi_aps) == 0:
+            return
+        count = len(band_aps(self.wifi_aps, self.channel_band))
+        self.channels_status_lbl.config(text=f"{count} on {self.channel_band} GHz at {self.wifi_scan_stamp}")
+
     # scan takes ~4s so it runs on a thread to keep the screen responsive
     def start_wifi_scan(self):
         if self.wifi_scanning:
             return
         if not has_wifi():
             self.wifi_status_lbl.config(text="No Wi-Fi adapter on this device")
+            self.channels_status_lbl.config(text="No Wi-Fi adapter on this device")
             return
         self.wifi_scanning = True
         self.wifi_scan_button.config(text="Scanning...")
+        self.channels_scan_button.config(text="Scanning...")
         self.wifi_status_lbl.config(text="Looking for networks...")
+        self.channels_status_lbl.config(text="Looking for networks...")
         threading.Thread(target=self.wifi_scan_thread, daemon=True).start()
 
     def wifi_scan_thread(self):
@@ -295,13 +367,20 @@ class WifiScreens:
     def show_wifi_results(self, access_points):
         self.wifi_scanning = False
         self.wifi_scan_button.config(text="↻ Scan")
+        self.channels_scan_button.config(text="↻ Scan")
 
         for child in self.wifi_rows.winfo_children():
             child.destroy()
         self.wifi_canvas.yview_moveto(0)
 
         stamp = datetime.now().strftime("%I:%M %p")
-        self.wifi_status_lbl.config(text=f"{len(access_points)} networks at {stamp}, tap one for info")
+        self.wifi_aps = access_points
+        self.wifi_scan_stamp = stamp
+        self.channel_graph.show(access_points, self.channel_band)
+        self.update_channel_status()
+        if len(access_points) == 0:
+            self.channels_status_lbl.config(text="No networks found")
+        self.wifi_status_lbl.config(text=f"{len(access_points)} networks at {stamp}")
 
         if len(access_points) == 0:
             tk.Label(self.wifi_rows, text="No networks found", font=("Helvetica", 14),

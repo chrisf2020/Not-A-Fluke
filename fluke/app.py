@@ -1,14 +1,17 @@
 # main window: top bar, tab bar (Cable / Wi-Fi / History), the cable test screens and the scan loop
 # history and wifi screens come from history.py and wifi.py as mixins
 
+import os
 import re
+import sys
 import time
 import threading
 import tkinter as tk
 from tkinter import ttk
 
 from .config import (VERSION, INTERFACE, WIFI_INTERFACE, CARRIER_PATH, SWITCH_DISCOVERY_TIMEOUT, SWITCH_QUICK_CHECK,
-                     BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger)
+                     THEME, THEME_PATH, LOG_DIR, BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, SOFT,
+                     PRESSED, ON_ACCENT, GOOD, OK, BAD, logger)
 from .history import HistoryScreens, save_scan_record, now_stamp, is_clock_synced, format_stamp
 from .wifi import WifiScreens
 from .graph import MetricsGraph
@@ -23,7 +26,7 @@ SCAN_STEPS = ["Switch", "DNS", "Ping", "Speed"]
 
 # which tab each screen belongs to
 VIEW_TAB = {"scanner": "cable", "results": "cable", "cable_speed": "cable", "wifi": "wifi", "ap": "wifi",
-            "wifi_speed": "wifi", "history": "history", "detail": "history",
+            "wifi_speed": "wifi", "channels": "wifi", "history": "history", "detail": "history",
             "share_cable": "cable", "share_history": "history"}
 
 
@@ -102,6 +105,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
     # windowed = 480x320 window for VM/desktop, start_workers=False is for tests
     def __init__(self, root, windowed=False, start_workers=True):
         self.root = root
+        self.windowed = windowed
         self.root.title("Not-A-Fluke")
         if windowed:
             self.root.geometry(WINDOW_SIZE)
@@ -129,14 +133,20 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
         # title on the left. exit, version and IP on the right
         top_bar = tk.Frame(root, bg=BAR_BG)
-        top_bar.pack(side=tk.TOP, fill=tk.X)
+        # a little room above the text, the screen's frame covers the very top edge
+        top_bar.pack(side=tk.TOP, fill=tk.X, ipady=2)
         tk.Label(top_bar, text="NOT-A-FLUKE", font=("Helvetica", 11, "bold"), bg=BAR_BG, fg=ACCENT).pack(side=tk.LEFT, padx=6)
         self.exit_button = tk.Label(top_bar, text=" ✕ ", font=("DejaVu Sans", 12, "bold"), bg=BAR_BG, fg=BAD)
         self.exit_button.pack(side=tk.RIGHT, padx=(4, 0))
         self.exit_button.bind("<ButtonRelease-1>", lambda event: self.exit_pressed())
+        # sun / moon button flips light and dark mode
+        theme_button = tk.Label(top_bar, text="☀" if THEME == "dark" else "☾", font=("DejaVu Sans", 12, "bold"),
+                                bg=BAR_BG, fg=ACCENT)
+        theme_button.pack(side=tk.RIGHT, padx=4)
+        theme_button.bind("<ButtonRelease-1>", lambda event: self.switch_theme())
         tk.Label(top_bar, text="v" + VERSION, font=("Helvetica", 10), bg=BAR_BG, fg=MUTED).pack(side=tk.RIGHT, padx=4)
         # show the IP (cable first, then wifi) so you know where to SSH
-        self.ip_lbl = tk.Label(top_bar, text="", font=("Helvetica", 10), bg=BAR_BG, fg="#BBBBBB")
+        self.ip_lbl = tk.Label(top_bar, text="", font=("Helvetica", 10), bg=BAR_BG, fg=SOFT)
         self.ip_lbl.pack(side=tk.RIGHT, padx=4)
 
         # tabs along the bottom, packed before the arrows so they span the full width
@@ -180,10 +190,11 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.build_wifi_ui()
         self.build_ap_ui()
         self.build_wifi_speed_ui()
+        self.build_wifi_channels_ui()
         self.build_share_ui()
         self.frames = [self.scanner_frame, self.results_frame, self.cable_speed_frame, self.history_frame,
                        self.detail_frame, self.wifi_frame, self.ap_frame, self.wifi_speed_frame,
-                       self.share_frame]
+                       self.channels_frame, self.share_frame]
         self.scroll_canvases = {"results": self.scroll_canvas, "cable_speed": self.cable_speed_canvas,
                                 "detail": self.detail_canvas,
                                 "wifi": self.wifi_canvas, "ap": self.ap_canvas,
@@ -217,7 +228,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
     def make_button(self, parent, text, command, size=14):
         return tk.Button(
             parent, text=text, command=command, font=("Helvetica", size, "bold"),
-            bg=BAR_BG, fg=TEXT, activebackground="#444444", activeforeground=TEXT,
+            bg=BAR_BG, fg=TEXT, activebackground=PRESSED, activeforeground=TEXT,
             padx=12, pady=6 if size >= 14 else 2
         )
 
@@ -237,7 +248,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
         for text, command in options:
             on = text == active
             tk.Button(bar, text=text, command=command, font=("Helvetica", 11, "bold"), relief=tk.FLAT, bd=0,
-                      bg=ACCENT if on else BAR_BG, fg="#000000" if on else TEXT, pady=3,
+                      bg=ACCENT if on else BAR_BG, fg=ON_ACCENT if on else TEXT, pady=3,
                       activebackground=ACCENT, highlightthickness=0).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1)
         return bar
 
@@ -315,6 +326,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
         cable_views = [("Results", self.show_cable_results), ("Speed", self.show_cable_speed)]
         self.results_frame = tk.Frame(self.container, bg=BG)
         self.make_switcher(self.results_frame, cable_views, "Results")
+        # red notice when the cable is pulled after a test, the results stay up underneath
+        self.cable_removed_lbl = tk.Label(self.results_frame, text="Cable removed - plug it back in to test again",
+                                          font=("Helvetica", 11, "bold"), bg=BAD, fg="white", pady=3)
         self.scroll_canvas, self.scroll_content = self.make_scroll_area(self.results_frame)
 
         # the speed graph for the cable test
@@ -337,13 +351,14 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
         when = tk.Frame(self.scroll_content, bg=BG)
         when.pack(fill=tk.X, padx=8, pady=2)
-        self.lbl_tested = tk.Label(when, text="Tested: --", font=("Helvetica", 10), bg=BG, fg=MUTED)
-        self.lbl_tested.pack(side=tk.LEFT)
+        # buttons are packed first so they keep their size, the text gets whatever is left
         self.rescan_button = self.make_button(when, "↻ Rescan", self.rescan_pressed, size=11)
         self.rescan_button.pack(side=tk.RIGHT)
         # send this scan to a phone as a PDF (share.py)
         self.make_button(when, "QR", lambda: self.open_share(self.scan_results, "results"),
                          size=11).pack(side=tk.RIGHT, padx=4)
+        self.lbl_tested = tk.Label(when, text="Tested: --", font=("Helvetica", 10), bg=BG, fg=MUTED)
+        self.lbl_tested.pack(side=tk.LEFT)
 
         switch = self.make_card(self.scroll_content, "Switch")
         self.res_switch = self.make_row(switch, "Switch")
@@ -373,8 +388,6 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_rating = self.make_row(speed, "Rating")
         tk.Frame(speed, bg=CARD_BG, height=6).pack()
 
-        tk.Label(self.scroll_content, text="Drag or use the arrows to scroll", font=("Helvetica", 9),
-                 bg=BG, fg=MUTED, pady=8).pack(fill=tk.X)
 
     # --- EVENT HANDLERS ---
 
@@ -389,26 +402,36 @@ class FlukeApp(HistoryScreens, WifiScreens):
             self.root.destroy()
             return
         self.exit_armed = True
-        self.exit_button.config(text=" Sure? ", bg=BAD, fg=TEXT)
+        self.exit_button.config(text=" Sure? ", bg=BAD, fg="white")
         self.root.after(3000, self.disarm_exit)
+
+    # save the other theme and restart the app so every screen picks up the new colours
+    # (a scan that was running starts over, finished ones are still in History)
+    def switch_theme(self):
+        new_theme = "dark" if THEME == "light" else "light"
+        logger.info("theme switched to %s", new_theme)
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(THEME_PATH, "w") as f:
+                f.write(new_theme)
+        except OSError as err:
+            logger.warning("couldn't save the theme: %s", err)
+        os.environ["NOTAFLUKE_THEME"] = new_theme
+        self.running = False
+        command = [sys.executable, "-m", "fluke"]
+        if self.windowed:
+            command.append("--windowed")
+        os.execv(sys.executable, command)
 
     def disarm_exit(self):
         self.exit_armed = False
         self.exit_button.config(text=" ✕ ", bg=BAR_BG, fg=BAD)
 
-    # --- SEND TO PHONE (QR code -> PDF or text, see share.py) ---
+    # --- SEND TO PHONE (QR code -> PDF, see share.py) ---
 
     def build_share_ui(self):
         self.share_frame = tk.Frame(self.container, bg=BG)
-        bar = self.make_header(self.share_frame, "Send to phone", back=self.close_share)
-        # PDF = link to a PDF (same network), Message = the scan as a text message draft (no network)
-        self.share_mode_buttons = {}
-        for mode in ("Message", "PDF"):
-            button = tk.Button(bar, text=mode, command=lambda m=mode: self.set_share_mode(m),
-                               font=("Helvetica", 11, "bold"), relief=tk.FLAT, bd=0, padx=10, pady=2,
-                               bg=BAR_BG, fg=TEXT, activebackground=ACCENT, highlightthickness=0)
-            button.pack(side=tk.RIGHT, padx=1)
-            self.share_mode_buttons[mode] = button
+        self.make_header(self.share_frame, "Send to phone", back=self.close_share)
         body = tk.Frame(self.share_frame, bg=BG)
         body.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
         # QR on the left, what to do on the right
@@ -421,28 +444,18 @@ class FlukeApp(HistoryScreens, WifiScreens):
     # record = the scan to send, came_from = "results" or "detail" (where Back goes)
     def open_share(self, record, came_from):
         self.share_came_from = came_from
-        self.share_record = dict(record)
         view = "share_cable" if came_from == "results" else "share_history"
-        self.show_frame(self.share_frame, view)
-        self.set_share_mode("PDF")
-
-    def set_share_mode(self, mode):
-        self.share_mode = mode
-        for name, button in self.share_mode_buttons.items():
-            on = name == mode
-            button.config(bg=ACCENT if on else BAR_BG, fg="#000000" if on else TEXT)
         self.qr_canvas.delete("all")
-        if mode == "Message":
-            self.show_message_share()
-            return
         self.share_lbl.config(text="Making the PDF...", fg=TEXT)
+        self.show_frame(self.share_frame, view)
         # the PDF takes a second, so make it off the screen thread
-        threading.Thread(target=self.make_share, args=(self.share_record,), daemon=True).start()
+        threading.Thread(target=self.make_share, args=(dict(record),), daemon=True).start()
 
     def make_share(self, record):
         from .share import share_record, qr_matrix
         try:
-            url, interface = share_record(record)
+            aps, wifi_stamp = self.wifi_for_pdf()
+            url, interface = share_record(record, aps, wifi_stamp)
             matrix = qr_matrix(url)
         except ImportError:
             logger.exception("QR package missing")
@@ -450,30 +463,29 @@ class FlukeApp(HistoryScreens, WifiScreens):
             return
         except Exception as err:
             logger.exception("could not share the scan as a PDF")
-            # no network to share it on (no IP etc.): the text QR still works
-            self.root.after(0, self.share_failed, f"No PDF: {err}.", True)
+            self.root.after(0, self.share_failed, f"No PDF: {err}.")
             return
-        self.root.after(0, self.show_share, url, interface, matrix)
+        self.root.after(0, self.show_share, interface, matrix)
 
-    def show_share(self, url, interface, matrix):
-        if self.share_mode != "PDF":    # switched to Text while the PDF was being made
-            return
+    # the Wi-Fi tab's last scan for the PDF's channel map, or a fresh scan if there isn't one yet
+    def wifi_for_pdf(self):
+        if len(self.wifi_aps) > 0:
+            return self.wifi_aps, getattr(self, "wifi_scan_stamp", "")
+        from .wifi import scan_wifi
+        try:
+            self.root.after(0, self.share_lbl.config, {"text": "Scanning Wi-Fi for the PDF..."})
+            return scan_wifi(), time.strftime("%I:%M %p")
+        except Exception:
+            logger.exception("Wi-Fi scan for the PDF failed")
+            return None, ""
+
+    def show_share(self, interface, matrix):
         self.draw_qr(matrix)
         network = "Wi-Fi" if interface == WIFI_INTERFACE else "network"
         self.share_lbl.config(fg=TEXT, text=(
             "Scan to open the PDF.\n\n"
-            "\"Not private\"? Tap Show Details, then visit this website.\n\n"
+            "\"Not private\"? Show Details, then visit this website.\n\n"
             f"Phone must be on the Pi's {network}."))
-
-    def show_message_share(self):
-        from .share import scan_message_link, qr_matrix
-        try:
-            # L = least error correction, so the squares stay as big as possible
-            self.draw_qr(qr_matrix(scan_message_link(self.share_record), error_correction="L"))
-        except ImportError:
-            self.share_failed("The QR package is missing. Run  notafluke  once over SSH to install it.")
-            return
-        self.share_lbl.config(fg=TEXT, text="Scan to open a text message with the results. No Wi-Fi needed.")
 
     # black squares on the white canvas, as big as fit
     def draw_qr(self, matrix):
@@ -488,11 +500,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
                     y = offset + row_number * cell
                     self.qr_canvas.create_rectangle(x, y, x + cell, y + cell, fill="black", outline="")
 
-    def share_failed(self, message, use_text=False):
-        if use_text and self.share_mode == "PDF":
-            self.set_share_mode("Message")
-            self.share_lbl.config(text=message + "\n\n" + self.share_lbl.cget("text"), fg=TEXT)
-            return
+    def share_failed(self, message):
         self.qr_canvas.delete("all")
         self.share_lbl.config(text=message, fg=BAD)
 
@@ -525,7 +533,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
     # scroll once, then keep going while held
     def arrow_pressed(self, arrow, direction):
-        arrow.config(bg="#444444", relief=tk.SUNKEN)
+        arrow.config(bg=PRESSED, relief=tk.SUNKEN)
         self.arrow_direction = direction
         if self.current_view == "history":
             self.scroll_by(direction)      # history is paged, so no repeat
@@ -569,8 +577,8 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.current_view = view
         for name, button in self.tab_buttons.items():
             on = name == VIEW_TAB[view]
-            button.config(bg=ACCENT if on else BAR_BG, fg="#000000" if on else TEXT,
-                          activebackground=ACCENT if on else "#444444")
+            button.config(bg=ACCENT if on else BAR_BG, fg=ON_ACCENT if on else TEXT,
+                          activebackground=ACCENT if on else PRESSED)
 
     def current_tab(self):
         return VIEW_TAB[self.current_view]
@@ -590,6 +598,12 @@ class FlukeApp(HistoryScreens, WifiScreens):
             self.show_frame(self.scanner_frame, "scanner")
 
     # the test keeps running while you're on another tab, it just won't pull you back
+    def show_cable_removed(self, removed):
+        if removed:
+            self.cable_removed_lbl.pack(fill=tk.X, padx=6, pady=(0, 2), before=self.scroll_canvas)
+        else:
+            self.cable_removed_lbl.pack_forget()
+
     def show_scanner_ui(self):
         self.stop_loading_animation()
         self.cable_view = "scanner"
@@ -603,9 +617,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
         for label, (text, color) in zip(self.summary_labels, scan_summary(results)):
             label.config(text="● " + text, fg=color)
 
-        tested_text = f"Tested {format_stamp(results['finished_at'])}"
+        tested_text = f"Tested {format_stamp(results['finished_at'], short=True)}"
         if results["clock_synced"] != "yes":
-            tested_text += " (clock not synced)"
+            tested_text += " (clock off)"
         self.lbl_tested.config(text=tested_text)
         self.rescan_button.config(text="↻ Rescan")
 
@@ -818,6 +832,8 @@ class FlukeApp(HistoryScreens, WifiScreens):
                 self.scan_results, INTERFACE,
                 on_status=lambda text: self.root.after(0, self.set_loading_message, text)
             )
+            # saved with the scan so the PDF can draw the speed graph, even from History
+            self.scan_results["speed_curves"] = self.speed_curves
 
             # 5. show results
             if not self.is_cable_connected():
@@ -827,9 +843,17 @@ class FlukeApp(HistoryScreens, WifiScreens):
             self.finish_scan(True)
             self.root.after(0, self.update_scanner, "DONE", GOOD, 4, "")
             self.root.after(0, self.show_results_ui)
+            # scan Wi-Fi now in the background, so the QR / PDF is ready right away when tapped
+            self.root.after(0, self.start_wifi_scan)
 
             # wait for the cable to come out, or for Rescan
             self.rescan_requested = False
             while self.is_cable_connected() and self.running and not self.rescan_requested:
                 time.sleep(0.5)
             logger.info("rescan pressed" if self.rescan_requested else "cable removed")
+            if not self.rescan_requested:
+                # keep the results up, say the cable came out, and wait for it to go back in
+                self.root.after(0, self.show_cable_removed, True)
+                while not self.is_cable_connected() and self.running:
+                    time.sleep(0.5)
+                self.root.after(0, self.show_cable_removed, False)

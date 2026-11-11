@@ -150,7 +150,7 @@ UNIT
     echo "On: it'll start by itself the next time the Pi boots (sudo reboot to see it now)."
 }
 
-stop() { pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI_MATCH" 2>/dev/null; }
+stop() { pkill -f "fluke/tap.py" 2>/dev/null; pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI_MATCH" 2>/dev/null; }
 
 # after the GUI closes, clear the small screen and move tty1-6 back onto it
 # the text console and the GUI share the one small screen. 0 = console stops drawing on it
@@ -275,6 +275,9 @@ EOF
 cat > "$CONF_DIR/session" <<EOF
 #!/bin/sh
 xset s off -dpms 2>/dev/null
+# at boot the console can still write onto the screen for a few seconds after the GUI is up,
+# and X doesn't know, so bits (like the arrows) stay missing until tapped. Repaint everything a few times
+(sleep 3; xrefresh; sleep 5; xrefresh; sleep 10; xrefresh) 2>/dev/null &
 # Tiny window manager so the GUI's fullscreen fills the whole small screen.
 matchbox-window-manager -use_titlebar no -use_cursor no &
 cd "$DIR" && exec python3 -m fluke
@@ -286,13 +289,23 @@ CMD=(xinit "$CONF_DIR/session" -- /usr/bin/Xorg "$DISPLAY_NUM" -config "$CONF_DI
      vt8 -sharevts -novtswitch -nolisten tcp -nocursor
      -logfile /tmp/notafluke-xorg.log)
 
+# a "button" on the bottom line of the terminal. Tapping the screen starts the GUI again
+wait_for_tap() {
+  # notafluke was started again and closed this copy - the new one has the screen
+  sleep 3
+  pgrep -f "Xorg $DISPLAY_NUM" >/dev/null && return
+  printf '\033[99;1H\033[7m   TAP THE SCREEN TO START NOT-A-FLUKE   \033[0m' > /dev/tty1
+  python3 "$DIR/fluke/tap.py" && exec "$SELF" boot
+}
+
 # run the GUI, then give the screen back to the terminal
-run() { console_bind 0; "${CMD[@]}"; closed_screen; }
+run() { console_bind 0; "${CMD[@]}"; closed_screen; wait_for_tap; }
 
 if [ "$1" = "-f" ]; then
   run; exit
 fi
-export -f run closed_screen console_bind
+export -f run closed_screen console_bind wait_for_tap
+export DIR SELF DISPLAY_NUM
 export CMD_STR="$(printf '%q ' "${CMD[@]}")"
 setsid nohup bash -c 'eval "CMD=($CMD_STR)"; run' >"$LOG" 2>&1 < /dev/null &
 echo "Not-A-Fluke is running on the small screen.  Stop: notafluke stop   Log: notafluke log"

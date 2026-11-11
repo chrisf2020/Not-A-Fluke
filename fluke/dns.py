@@ -52,10 +52,19 @@ def dns_lookup(server, name, interface=INTERFACE):
         sock.close()
 
 
-# only count questions (qr == 0), the answers are the same lookups
-def count_dns_question(results, packet):
+# the name the DNS test looks up
+TEST_DOMAIN = "google.com"
+
+
+# only count questions (qr == 0), the answers are the same lookups. Skips the Pi's own background
+# lookups (updates, apps running on it like api.anthropic.com) - only our test lookup and lookups
+# from other devices on the port count
+def count_dns_question(results, packet, own_ip=""):
     if packet.haslayer(DNS) and packet.haslayer(DNSQR) and packet[DNS].qr == 0:
         qname = packet[DNSQR].qname.decode(errors="replace").rstrip(".")
+        from_pi = packet.haslayer("IP") and packet["IP"].src == own_ip
+        if from_pi and qname != TEST_DOMAIN:
+            return
         results["dns_queries"] += 1
         results["dns_last_domain"] = qname[:25]
 
@@ -66,8 +75,10 @@ def run_dns_test(results, interface=INTERFACE):
     sniffer_ok = False
     try:
         sniffer_ready = threading.Event()
+        from .speed import get_ip
+        own_ip = get_ip(interface)
         sniffer = AsyncSniffer(
-            iface=interface, filter="port 53", prn=lambda packet: count_dns_question(results, packet),
+            iface=interface, filter="port 53", prn=lambda packet: count_dns_question(results, packet, own_ip),
             store=False, started_callback=sniffer_ready.set
         )
         sniffer.start()
@@ -85,7 +96,7 @@ def run_dns_test(results, interface=INTERFACE):
             servers = ["1.1.1.1"]   # none from the network, use a public one
         server = servers[0]
 
-        worked, answer = dns_lookup(server, "google.com", interface)
+        worked, answer = dns_lookup(server, TEST_DOMAIN, interface)
         results["dns_server"] = server
         results["dns_time"] = answer
 
@@ -94,7 +105,7 @@ def run_dns_test(results, interface=INTERFACE):
         else:
             # no sniffer, so just count our own lookup
             results["dns_queries"] += 1
-            results["dns_last_domain"] = "google.com"
+            results["dns_last_domain"] = TEST_DOMAIN
     finally:
         # stop() can re-raise whatever killed the sniffer
         if sniffer is not None:

@@ -1,4 +1,4 @@
-# scan history: saves each scan to /var/log/fluke-gui/scans.jsonl (newest 500 kept)
+# scan history: saves each scan to /var/log/fluke-gui/scans.jsonl (newest 5 pages = 30 kept)
 # plus the History / Scan Detail screens
 
 import os
@@ -198,7 +198,7 @@ class HistoryScreens:
 
     # reload from disk and go to page 1
     def open_history(self):
-        self.history_records = load_scan_history()
+        self.history_records = load_scan_history()[:MAX_SCAN_RECORDS]
         self.history_page = 0
         self.render_history_page()
         self.show_history_frame()
@@ -229,7 +229,7 @@ class HistoryScreens:
                 command=lambda r=record: self.show_detail_ui(r)
             ).pack(fill=tk.X, pady=2)
 
-        self.history_page_lbl.config(text=f"Page {self.history_page + 1} / {pages}  (! = cut short)")
+        self.history_page_lbl.config(text=f"Page {self.history_page + 1} / {pages}")
 
     def history_newer(self):
         if self.history_page > 0:

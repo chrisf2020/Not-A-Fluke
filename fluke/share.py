@@ -1,16 +1,10 @@
-# send a scan to your phone, two ways:
-#   PDF:  makes a PDF report, serves it from a tiny web server on the Pi, and the QR code is a
-#         link to it. The phone has to be on the same network as the Pi.
-#   Message: the QR code holds the scan itself as a text message draft (an sms: link). Works with
-#         no network: the phone opens Messages with the results typed in, you pick who it goes to.
-#         (Plain text just gets Googled by the iPhone camera, and a mailto: with no address
-#         shows "Add to contacts", so it's sms.)
+# send a scan to your phone: makes a PDF report, serves it from a tiny web server on the Pi,
+# and the QR code is a link to it. The phone has to be on the same network as the Pi.
 
 import os
 import ssl
 import subprocess
 import threading
-import urllib.parse
 from functools import partial
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 
@@ -48,30 +42,150 @@ def report_filename(record):
     return f"scan-{stamp}.pdf"
 
 
-# draws the report text onto white pages and saves them as one PDF
-def build_pdf(record, path):
-    from PIL import Image, ImageDraw, ImageFont
-    title_font = ImageFont.truetype(os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf"), 44)
-    small_font = ImageFont.truetype(os.path.join(FONT_DIR, "DejaVuSans.ttf"), 24)
-    body_font = ImageFont.truetype(os.path.join(FONT_DIR, "DejaVuSansMono.ttf"), 28)
-    line_height = 40
+def pdf_fonts():
+    from PIL import ImageFont
+    return {
+        "title": ImageFont.truetype(os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf"), 44),
+        "heading": ImageFont.truetype(os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf"), 32),
+        "small": ImageFont.truetype(os.path.join(FONT_DIR, "DejaVuSans.ttf"), 24),
+        "body": ImageFont.truetype(os.path.join(FONT_DIR, "DejaVuSansMono.ttf"), 28),
+    }
 
-    lines = format_record_detail(record).split("\n")
+
+# a white page with the report title on it. returns (page, draw, y where the content starts)
+def new_page(record, fonts):
+    from PIL import Image, ImageDraw
+    page = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), "white")
+    draw = ImageDraw.Draw(page)
+    draw.text((MARGIN, MARGIN), "Not-A-Fluke scan report", font=fonts["title"], fill="black")
+    subtitle = f"Scan {format_stamp(record.get('started_at'))}   |   Not-A-Fluke v{VERSION}"
+    draw.text((MARGIN, MARGIN + 60), subtitle, font=fonts["small"], fill="#555555")
+    draw.line((MARGIN, MARGIN + 105, PAGE_WIDTH - MARGIN, MARGIN + 105), fill="#999999", width=2)
+    return page, draw, MARGIN + 130
+
+
+# lets the Wi-Fi channel map code in graph.py (made for the screen) draw onto a PDF page.
+# it only calls create_line, create_polygon and create_text, so that's all this has.
+# x0, y0 = top left of the chart on the page, scale = how much bigger than on screen
+class PdfCanvas:
+    def __init__(self, draw, x0, y0, scale):
+        self.draw = draw
+        self.x0 = x0
+        self.y0 = y0
+        self.scale = scale
+
+    # [x, y, x, y, ...] on screen -> [(x, y), (x, y), ...] on the page
+    def points(self, coords):
+        result = []
+        for k in range(0, len(coords), 2):
+            result.append((self.x0 + coords[k] * self.scale, self.y0 + coords[k + 1] * self.scale))
+        return result
+
+    def create_line(self, *coords, fill="black", width=1, **unused):
+        self.draw.line(self.points(coords), fill=fill, width=round(width * self.scale))
+
+    def create_polygon(self, *coords, fill="", **unused):
+        self.draw.polygon(self.points(coords), fill=fill)
+
+    def create_text(self, x, y, text="", anchor="center", fill="black", font=("Helvetica", 10), **unused):
+        from PIL import ImageFont
+        font_file = "DejaVuSans.ttf"
+        if len(font) > 2 and font[2] == "bold":
+            font_file = "DejaVuSans-Bold.ttf"
+        size = round(font[1] * self.scale * 1.35)
+        # Tk and PIL name text anchors differently
+        pil_anchors = {"center": "mm", "n": "mt", "s": "mb", "e": "rm", "w": "lm"}
+        self.draw.text(self.points((x, y))[0], text, fill=fill, anchor=pil_anchors[anchor],
+                       font=ImageFont.truetype(os.path.join(FONT_DIR, font_file), size))
+
+
+# one speed curve (a list of Mbps numbers) as a line across the chart
+def draw_curve(draw, values, color, left, right, top, bottom, highest):
+    if len(values) < 2:
+        return
+    step = (right - left) / (len(values) - 1)
+    points = []
+    for k in range(len(values)):
+        points.append((left + k * step, bottom - values[k] / highest * (bottom - top)))
+    draw.line(points, fill=color, width=5)
+
+
+# the download and upload speed curves in a dark box, like the speed graph on screen
+def draw_speed_chart(draw, fonts, x, y, width, height, record):
+    from .graph import DOWN_COLOR, UP_COLOR
+    from .config import CARD_BG, LINE, MUTED
+    curves = record.get("speed_curves") or {}
+    down = curves.get("down") or []
+    up = curves.get("up") or []
+    draw.rectangle((x, y, x + width, y + height), fill=CARD_BG)
+    if len(down) < 2 and len(up) < 2:
+        draw.text((x + width / 2, y + height / 2), "No speed graph saved for this scan",
+                  font=fonts["small"], fill="#888888", anchor="mm")
+        return
+
+    left = x + 110
+    right = x + width - 30
+    top = y + 30
+    bottom = y + height - 60
+    highest = max(down + up) * 1.15
+
+    # Mbps lines and numbers down the left
+    for k in range(5):
+        line_y = bottom - (bottom - top) * k / 4
+        draw.line((left, line_y, right, line_y), fill=LINE, width=1)
+        draw.text((left - 12, line_y), str(round(highest * k / 4)), font=fonts["small"], fill=MUTED, anchor="rm")
+    draw.text((x + 20, top - 10), "Mbps", font=fonts["small"], fill=MUTED, anchor="lm")
+
+    draw_curve(draw, down, DOWN_COLOR, left, right, top, bottom, highest)
+    draw_curve(draw, up, UP_COLOR, left, right, top, bottom, highest)
+
+    draw.text((left, bottom + 32), "Download " + str(record.get("speed_down", "--")),
+              font=fonts["small"], fill=DOWN_COLOR, anchor="lm")
+    draw.text((left + width / 2.4, bottom + 32), "Upload " + str(record.get("speed_up", "--")),
+              font=fonts["small"], fill=UP_COLOR, anchor="lm")
+
+
+# one band of the Wi-Fi channel map, drawn by the same code as the Wi-Fi tab (graph.py)
+def draw_wifi_chart(draw, x, y, width, height, aps, band):
+    from .graph import draw_channel_chart
+    from .config import CARD_BG
+    draw.rectangle((x, y, x + width, y + height), fill=CARD_BG)
+    scale = 2.5
+    draw_channel_chart(PdfCanvas(draw, x, y, scale), width / scale, height / scale, aps, band)
+
+
+# report text first, then a page with the speed graph and the Wi-Fi channel map.
+# aps = a Wi-Fi scan from scan_wifi() (None = leave the Wi-Fi graph out), wifi_stamp = when it ran
+def build_pdf(record, path, aps=None, wifi_stamp=""):
+    fonts = pdf_fonts()
+    line_height = 40
     pages = []
-    page = None
-    y = 0
-    for line in lines:
-        if page is None or y + line_height > PAGE_HEIGHT - MARGIN:
-            page = Image.new("RGB", (PAGE_WIDTH, PAGE_HEIGHT), "white")
-            draw = ImageDraw.Draw(page)
-            draw.text((MARGIN, MARGIN), "Not-A-Fluke scan report", font=title_font, fill="black")
-            subtitle = f"Scan {format_stamp(record.get('started_at'))}   |   Not-A-Fluke v{VERSION}"
-            draw.text((MARGIN, MARGIN + 60), subtitle, font=small_font, fill="#555555")
-            draw.line((MARGIN, MARGIN + 105, PAGE_WIDTH - MARGIN, MARGIN + 105), fill="#999999", width=2)
-            y = MARGIN + 130
+    page, draw, y = new_page(record, fonts)
+    pages.append(page)
+    for line in format_record_detail(record).split("\n"):
+        if y + line_height > PAGE_HEIGHT - MARGIN:
+            page, draw, y = new_page(record, fonts)
             pages.append(page)
-        draw.text((MARGIN, y), line, font=body_font, fill="black")
+        draw.text((MARGIN, y), line, font=fonts["body"], fill="black")
         y = y + line_height
+
+    # graphs page
+    page, draw, y = new_page(record, fonts)
+    pages.append(page)
+    width = PAGE_WIDTH - 2 * MARGIN
+    draw.text((MARGIN, y), "Speed test", font=fonts["heading"], fill="black")
+    draw_speed_chart(draw, fonts, MARGIN, y + 50, width, 420, record)
+    y = y + 500
+    if aps is not None:
+        title = "Wi-Fi channels (signal in dBm)"
+        if wifi_stamp:
+            title = title + f", scanned {wifi_stamp}"
+        draw.text((MARGIN, y), title, font=fonts["heading"], fill="black")
+        y = y + 50
+        for band in ("2.4", "5"):
+            draw.text((MARGIN, y), f"{band} GHz", font=fonts["small"], fill="#555555")
+            draw_wifi_chart(draw, MARGIN, y + 34, width, 330, aps, band)
+            y = y + 384
 
     pages[0].save(path, "PDF", resolution=150, save_all=True, append_images=pages[1:])
 
@@ -147,54 +261,23 @@ def phone_reachable_ip():
 
 
 # makes the PDF and starts serving it. returns (url, interface) or raises with a reason
-def share_record(record):
+def share_record(record, aps=None, wifi_stamp=""):
     ip, interface = phone_reachable_ip()
     if ip == "":
         raise RuntimeError("The Pi has no IP address, so a phone can't reach it")
     os.makedirs(REPORT_DIR, exist_ok=True)
     name = report_filename(record)
-    build_pdf(record, os.path.join(REPORT_DIR, name))
+    build_pdf(record, os.path.join(REPORT_DIR, name), aps, wifi_stamp)
     delete_old_reports()
     port = start_server()
     address = ip if port == 80 else f"{ip}:{port}"
     return f"http://{address}/{name}", interface
 
 
-# the scan as short text for the Text QR (speeds in Mbps). Kept to about 200 characters so
-# the QR squares stay big enough for a phone to read off the small screen
-def scan_text(record):
-    def get(key):
-        value = str(record.get(key, "--"))
-        # shorter words for the long values, so more fits
-        for long, short in ((" / Untagged", ""), ("Not Advertised", "--"), ("Not advertised", "no"),
-                            (" Mbps", ""), (" ms", "ms"), (" %", "%"), ("GigabitEthernet", "Gi")):
-            value = value.replace(long, short)
-        return value
-
-    when = format_stamp(record.get("started_at"), short=True)
-    lines = [
-        f"NOT-A-FLUKE {when}",
-        f"SW {get('switch_name')} {get('switch_proto')}",
-        f"PORT {get('switch_port')} VLAN {get('switch_vlan')}",
-        f"SW IP {get('switch_ip')} VOICE {get('switch_voice')}",
-        f"POE {get('switch_poe')}  LINK {get('link_speed')}",
-        f"DOWN {get('speed_down')} UP {get('speed_up')} {get('speed_rating')}",
-        f"LAT {get('ping_latency')} JIT {get('ping_jitter')} LOSS {get('ping_loss')}",
-        f"DNS {get('dns_server')} {get('dns_time')}",
-    ]
-    return "\n".join(lines)
-
-
-# the scan as a text message draft link. "sms:?&body=" opens on both iPhone and Android
-def scan_message_link(record):
-    return "sms:?&body=" + urllib.parse.quote(scan_text(record))
-
-
 # QR code as rows of True (black) / False (white) squares, quiet border included
-def qr_matrix(text, error_correction="M"):
+def qr_matrix(text):
     import qrcode
-    levels = {"L": qrcode.constants.ERROR_CORRECT_L, "M": qrcode.constants.ERROR_CORRECT_M}
-    qr = qrcode.QRCode(border=2, error_correction=levels[error_correction])
+    qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
     qr.add_data(text)
     qr.make(fit=True)
     return qr.get_matrix()
