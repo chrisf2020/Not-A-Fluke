@@ -93,6 +93,7 @@ def theme_colors(theme):
             "GOOD": "#2E8B12",
             "OK": "#B8860B",
             "BAD": "#D32F2F",
+            "SHADOW": "#C4C4C4",      # under the boxes
             # one colour per access point on the channel map, darker ones so they show on white
             "CHANNEL_COLORS": ["#E65100", "#0077B6", "#D32F2F", "#7B1FA2", "#2E7D32", "#C2185B", "#00838F", "#5D4037"],
         }
@@ -112,6 +113,7 @@ def theme_colors(theme):
         "GOOD": "#76FF03",
         "OK": "#FFD700",
         "BAD": "#FF5252",
+        "SHADOW": "#050505",
         "CHANNEL_COLORS": ["#FFEB3B", "#00E5FF", "#FF5252", "#B15CFF", "#76FF03", "#FF9A2E", "#4DA3FF", "#FF80AB"],
     }
 

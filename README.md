@@ -1,4 +1,4 @@
-# Not-A-Fluke
+<p align="center"><img src="fluke/logo.png" alt="Not-A-Fluke" width="360"></p>
 
 A touchscreen network tester for the Raspberry Pi. It does the same job as a Fluke network tester at a much, much lower price.
 
@@ -37,10 +37,6 @@ On the Pi, `install` also makes it start on boot (on the start screen, tap to be
 
 ## Requirements
 
-- Raspberry Pi OS or Debian 12 (Bookworm) / 13 (Trixie)
-- `armhf`, `arm64` or `x86_64`
-- A touchscreen:
-  - 7" HDMI touchscreen (1024x600, USB touch). Needs `dtoverlay=vc4-kms-v3d` in `/boot/firmware/config.txt`. Turns sideways with the ⟳ button.
-  - or the 3.5" SPI touchscreen (`dtoverlay=piscreen` or `tft35a`)
-  - or any desktop on a VM
-- An Ethernet port (`eth0` by default)
+- Raspberry Pi OS or Debian 12 / 13
+- A 7" HDMI touchscreen, or a 3.5" SPI touchscreen, or a VM desktop
+- An Ethernet port

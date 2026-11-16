@@ -214,11 +214,14 @@ class MetricsGraph:
             self.draw()
 
 
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
 # a small graph of past speed tests: download and upload lines, oldest on the left
 def draw_history_chart(canvas, width, height, tests):
     canvas.delete("all")
     left, right, top, bottom = px(40), width - px(8), px(24), height - px(30)
-    highest = max(max(down, up) for down, up in tests) * 1.15 or 1
+    highest = max(max(test[0], test[1]) for test in tests) * 1.15 or 1
     # key: which colour is which
     canvas.create_text(left, px(2), text="● Download", anchor="nw", fill=DOWN_COLOR, font=("Helvetica", 9, "bold"))
     canvas.create_text(left + px(90), px(2), text="● Upload", anchor="nw", fill=UP_COLOR, font=("Helvetica", 9, "bold"))
@@ -228,11 +231,17 @@ def draw_history_chart(canvas, width, height, tests):
         canvas.create_line(left, y, right, y, fill=LINE)
         canvas.create_text(left - px(4), y, text=f"{value:.0f}", anchor="e", fill=MUTED, font=("Helvetica", 8))
     canvas.create_text(px(2), px(2), text="Mbps", anchor="nw", fill=MUTED, font=("Helvetica", 8))
-    canvas.create_text(left, bottom + px(3), text="1", anchor="n", fill=MUTED, font=("Helvetica", 8))
-    canvas.create_text(right, bottom + px(3), text=str(len(tests)), anchor="n", fill=MUTED, font=("Helvetica", 8))
-    canvas.create_text((left + right) / 2, bottom + px(14), text="Test (oldest to newest)", anchor="n",
+    canvas.create_text((left + right) / 2, bottom + px(14), text="each dot is one test", anchor="n",
                        fill=MUTED, font=("Helvetica", 8))
     step = (right - left) / max(len(tests) - 1, 1)
+    # the month under the first test of each month (stamps look like 2026-11-15T23:00:00)
+    month = ""
+    for n, test in enumerate(tests):
+        if test[2][:7] != month and test[2][:7]:
+            month = test[2][:7]
+            canvas.create_line(left + n * step, top, left + n * step, bottom, fill=LINE, dash=(2, 3))
+            canvas.create_text(left + n * step, bottom + px(3), text=MONTHS[int(month[5:7]) - 1] + " '" + month[2:4],
+                               anchor="nw", fill=MUTED, font=("Helvetica", 8))
     for k, color in ((0, DOWN_COLOR), (1, UP_COLOR)):
         points = [(left + n * step, bottom - test[k] / highest * (bottom - top)) for n, test in enumerate(tests)]
         if len(points) > 1:
@@ -242,6 +251,18 @@ def draw_history_chart(canvas, width, height, tests):
 
 
 # --- WI-FI CHANNEL MAP ---
+
+# the least crowded channel to put an AP on: 1 / 6 / 11 on 2.4 GHz, the non-radar 5 GHz ones.
+# Each nearby AP counts more the louder it is and the closer its channel
+def best_channel(aps, band):
+    choices = [1, 6, 11] if band == "2.4" else [36, 40, 44, 48, 149, 153, 157, 161, 165]
+
+    def crowd(channel):
+        freq = channel_freq(channel, band)
+        return sum(max(0, ap["signal"] + 100) for ap in band_aps(aps, band)
+                   if abs(ap.get("center", ap["freq"]) - freq) < (width_mhz(ap["width"]) / 2 + 10))
+    return min(choices, key=crowd)
+
 
 # the colour of the AP in this place on the chart (0 = strongest)
 def ap_color(rank):
@@ -434,10 +455,14 @@ class ChannelGraph:
     def pressed(self, event):
         self.press_x = event.x
         self.dragged = False
+        self.finger_down = True
 
     # drag sideways to move along the band when zoomed in
     def moved(self, event):
-        if self.zoom == 1 or abs(event.x - self.press_x) < px(10):
+        # a new touch can send "moved" before "pressed": start from here, not the last swipe
+        if not getattr(self, "finger_down", False):
+            return self.pressed(event)
+        if self.zoom == 1 or (not self.dragged and abs(event.x - self.press_x) < px(10)):
             return
         self.dragged = True
         low, high = self.view()
@@ -447,6 +472,7 @@ class ChannelGraph:
 
     # a tap (not a drag) on an AP opens its details
     def released(self, event):
+        self.finger_down = False
         if self.dragged or self.on_tap is None:
             return
         for item in reversed(self.canvas.find_overlapping(event.x - 3, event.y - 3, event.x + 3, event.y + 3)):

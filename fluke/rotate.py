@@ -79,5 +79,6 @@ def set_scale(root, width, height):
     factor = min(width / 480, height / 320)
     if factor < 1.1:
         factor = 1.0
-    root.tk.call("tk", "scaling", _points * factor)
+    text = factor * (0.85 if width > height else 1)     # flat: a bit smaller text, less scrolling
+    root.tk.call("tk", "scaling", _points * text)
     config.SCALE = factor

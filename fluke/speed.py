@@ -46,6 +46,25 @@ def get_ip(interface=INTERFACE):
     return ""
 
 
+# what DHCP gave this port: {"lan_ip", "gateway", "dhcp_server", "lease"}, "--" if unknown
+def network_info(interface=INTERFACE):
+    info = {"lan_ip": get_ip(interface) or "none (no DHCP)", "gateway": "--", "dhcp_server": "--", "lease": "--"}
+    try:
+        text = subprocess.run(["nmcli", "-t", "-f", "IP4.GATEWAY,DHCP4", "dev", "show", interface],
+                              capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return info
+    for line in text.splitlines():
+        if line.startswith("IP4.GATEWAY:") and line.split(":", 1)[1]:
+            info["gateway"] = line.split(":", 1)[1]
+        elif "dhcp_server_identifier = " in line:
+            info["dhcp_server"] = line.split(" = ")[1]
+        elif "dhcp_lease_time = " in line:
+            seconds = int(line.split(" = ")[1])
+            info["lease"] = f"{seconds // 86400} days" if seconds >= 86400 else f"{seconds // 3600} hours"
+    return info
+
+
 # which port traffic really leaves from for this source IP ("" if unknown). speedtest-cli
 # can only pick a source address, and with the cable in it usually routes out the cable
 def route_interface(source_ip, target=PING_TARGET):
@@ -162,6 +181,9 @@ def run_bandwidth_test(results, interface=INTERFACE, on_status=lambda text: None
             # source_address forces the test through this port
             on_status("Connecting to closest server...")
             st = speedtest.Speedtest(source_address=source_ip)
+            client = st.config.get("client", {})
+            results["public_ip"] = client.get("ip", "--")
+            results["isp"] = client.get("isp", "--")
             best = st.get_best_server()
             results["speed_server"] = f"{best.get('sponsor', '?')} ({best.get('name', '?')})"
             on_status(f"Testing with {results['speed_server']}")

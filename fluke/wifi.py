@@ -10,7 +10,7 @@ import tkinter as tk
 from datetime import datetime
 
 from .config import WIFI_INTERFACE, BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger, px
-from .graph import MetricsGraph, ChannelGraph, band_aps, ap_color
+from .graph import MetricsGraph, ChannelGraph, band_aps, ap_color, best_channel
 from .speed import get_ip, route_interface, run_ping_test, run_bandwidth_test, speed_test_lock
 
 
@@ -283,8 +283,9 @@ class WifiScreens:
 
         top = tk.Frame(self.channels_frame, bg=BG)
         top.pack(fill=tk.X, padx=px(8))
+        # its own line under the buttons, so the buttons always fit
         self.channels_status_lbl = tk.Label(top, text="", font=("Helvetica", 10), bg=BG, fg=MUTED)
-        self.channels_status_lbl.pack(side=tk.LEFT)
+        self.channels_status_lbl.pack(side=tk.BOTTOM, anchor="w")
         self.channels_scan_button = self.make_button(top, "↻ Scan", self.start_wifi_scan, size=11)
         self.channels_scan_button.pack(side=tk.RIGHT, pady=px(2))
         self.channels_band_button = self.make_button(top, "2.4 GHz", self.toggle_channel_band, size=11)
@@ -373,7 +374,9 @@ class WifiScreens:
         if len(self.wifi_aps) == 0:
             return
         count = len(band_aps(self.wifi_aps, self.channel_band))
-        self.channels_status_lbl.config(text=f"{count} on {self.channel_band} GHz at {self.wifi_scan_stamp}")
+        best = best_channel(self.wifi_aps, self.channel_band)
+        self.channels_status_lbl.config(text=f"{count} on {self.channel_band} GHz at {self.wifi_scan_stamp}, "
+                                             f"best channel {best}")
 
     # scan takes ~4s so it runs on a thread to keep the screen responsive
     def start_wifi_scan(self):
@@ -423,8 +426,7 @@ class WifiScreens:
             return
 
         for ap in access_points:
-            row = tk.Frame(self.wifi_rows, bg=CARD_BG)
-            row.pack(fill=tk.X, padx=px(8), pady=px(2))
+            row = self.rounded_box(self.wifi_rows, padx=px(8), pady=px(2), radius=px(22))
             name = ap["ssid"] + ("  (Pi)" if ap["connected"] else "")
             lock = "open" if ap["security"] == "OPEN" else "locked"
             parts = [

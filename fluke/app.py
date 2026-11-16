@@ -7,19 +7,20 @@ import sys
 import time
 import threading
 import json
+import subprocess
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
 from .config import (VERSION, INTERFACE, WIFI_INTERFACE, CARRIER_PATH, SWITCH_DISCOVERY_TIMEOUT, SWITCH_QUICK_CHECK,
                      THEME, THEME_PATH, LOG_DIR, BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, SOFT,
-                     PRESSED, ON_ACCENT, GOOD, OK, BAD, px, logger)
+                     PRESSED, ON_ACCENT, GOOD, OK, BAD, SHADOW, px, logger)
 from .history import HistoryScreens, save_scan_record, now_stamp, is_clock_synced, format_stamp
 from .wifi import WifiScreens
 from .rotate import hdmi_output, read_orientation, save_orientation, apply_orientation, screen_size, set_scale
 from . import config, graph, wifi, history
 from .graph import MetricsGraph
-from .speed import get_ip, link_speed, read_number, run_ping_test, run_bandwidth_test
+from .speed import network_info, get_ip, link_speed, read_number, run_ping_test, run_bandwidth_test
 from .switch import query_lldpd, parse_switch_topology, start_cdp_listener, start_switch_frame_listener, stop_listener
 
 # same size as the Pi's TFT so a VM window looks like the real screen
@@ -33,6 +34,44 @@ VIEW_TAB = {"scanner": "cable", "results": "cable", "cable_speed": "cable", "wif
             "wifi_speed": "wifi", "channels": "wifi", "history": "history", "detail": "history",
             "share_cable": "cable", "share_history": "history", "speed_history": "history",
             "log_cable": "cable", "log_history": "history"}
+
+# (label, key) for the Network card: what DHCP gave the test port
+NETWORK_ROWS = [("Pi's IP", "lan_ip"), ("Gateway", "gateway"), ("DHCP server", "dhcp_server"), ("Lease", "lease")]
+
+TAB_NAMES = ["cable", "wifi", "history"]
+
+
+# a rectangle with round corners on a canvas (left / right = which side's corners are round),
+# made of two rectangles and a circle in each round corner
+def round_rect(canvas, x1, y1, x2, y2, r, left=True, right=True, **style):
+    r = min(r, (y2 - y1) / 2, (x2 - x1) / 2)
+    style.setdefault("outline", "")
+    canvas.create_rectangle(x1 + (r if left else 0), y1, x2 - (r if right else 0), y2, **style)
+    canvas.create_rectangle(x1, y1 + r, x2, y2 - r, **style)
+    for x, rounded in ((x1, left), (x2 - 2 * r, right)):
+        if rounded:
+            canvas.create_oval(x, y1, x + 2 * r, y1 + 2 * r, **style)
+            canvas.create_oval(x, y2 - 2 * r, x + 2 * r, y2, **style)
+
+
+# a row of choices drawn as one long bar, round at both ends. The blue part sits at `position`
+# (0 = first, can be in between while it slides); a word turns dark when the blue is behind it
+def draw_segments(canvas, names, position, font, outside, size=None):
+    canvas.delete("all")
+    width, height = size or (canvas.winfo_width(), canvas.winfo_height())
+    part = width / len(names)
+    r = height / 2
+    canvas.config(bg=outside)
+    round_rect(canvas, 0, 0, width, height, r, fill=BAR_BG)
+    round_rect(canvas, position * part, 0, (position + 1) * part, height, r,
+               left=position < 0.5, right=position > len(names) - 1.5, fill=ACCENT)
+    for k, name in enumerate(names):
+        canvas.create_text((k + 0.5) * part, height / 2, text=name, font=font,
+                           fill=ON_ACCENT if abs(position - k) < 0.5 else TEXT)
+
+# where each tab and its pages sit left to right, for the slide between them
+SLIDE_ORDER = {"scanner": 0, "results": 0, "cable_speed": 1, "wifi": 10, "channels": 11, "wifi_speed": 12,
+               "history": 20, "speed_history": 21}
 
 # the coloured boxes at the top of the results, tap one to see what that part of the test saw
 SUMMARY_KEYS = ["Link", "Switch", "DNS", "Internet"]
@@ -222,42 +261,53 @@ class FlukeApp(HistoryScreens, WifiScreens):
     def build_ui(self):
         root = self.root
         root.configure(bg=BG)
+        self.pills = []
         self.style.configure("Custom.Horizontal.TProgressbar", troughcolor=CARD_BG, background=ACCENT, thickness=px(10))
 
         # standing up = taller than wide, the logo gets bigger then
         width, height = (480, 320) if self.windowed else screen_size(root)
         self.portrait = height > width
+        self.screen_width = width
 
         # logo on the left, then the cable and Wi-Fi addresses, buttons on the right
         top_bar = tk.Frame(root, bg=BAR_BG)
         top_bar.pack(side=tk.TOP, fill=tk.X, ipady=px(2))
         self.top_logo = logo_image(px(54) if self.portrait else px(36))
         if self.top_logo is not None:
-            logo = tk.Label(top_bar, image=self.top_logo, bg=BAR_BG)
+            self.logo_lbl = logo = tk.Label(top_bar, image=self.top_logo, bg=BAR_BG)
             logo.pack(side=tk.LEFT, padx=px(4))
             # tap the logo to start the test over
             logo.bind("<ButtonRelease-1>", lambda event: self.ask_restart())
         else:
             tk.Label(top_bar, text="NOT-A-FLUKE", font=("Helvetica", 11, "bold"), bg=BAR_BG, fg=ACCENT).pack(side=tk.LEFT, padx=6)
         # ✕ turns into two choices in the same spot: back to the start screen, or the terminal
-        exit_slot = tk.Frame(top_bar, bg=BAR_BG)
+        self.exit_slot = exit_slot = tk.Frame(top_bar, bg=BAR_BG)
         exit_slot.pack(side=tk.RIGHT)
         self.exit_button = self.make_top_button(exit_slot, " ✕ ", BAD, self.exit_pressed)
         self.exit_choices = tk.Frame(exit_slot, bg=BAR_BG)
-        for text, where in (("Terminal", "terminal"), ("Start screen", "start")):
-            choice = tk.Label(self.exit_choices, text=text, font=("Helvetica", 11, "bold"), bg=BAD, fg="white",
-                              padx=px(8), pady=px(4))
-            choice.pack(side=tk.RIGHT, padx=px(3))
-            choice.bind("<ButtonRelease-1>", lambda event, w=where: self.exit_to(w))
+        # shut down is the red one (it asks first), the other two just close the app
+        for text, command, color in (("⏻", self.ask_shutdown, BAD),
+                                     ("Start screen", lambda: self.exit_to("start"), PRESSED),
+                                     ("Terminal", lambda: self.exit_to("terminal"), PRESSED)):
+            self.make_pill(self.exit_choices, text, command, font=("DejaVu Sans", 11, "bold"), color=color,
+                           fg="white" if color == BAD else TEXT).pack(side=tk.RIGHT, padx=px(3))
+        # the version only shows here, to keep the top bar tidy
+        tk.Label(self.exit_choices, text="v" + VERSION, font=("Helvetica", 12, "bold"), bg=BAR_BG,
+                 fg=MUTED).pack(side=tk.RIGHT, padx=px(6))
         self.exit_armed = False
+        # theme, turn, version and clock hide while the ✕ choices are out, so nothing gets squashed
+        self.top_tools = tools = tk.Frame(top_bar, bg=BAR_BG)
+        tools.pack(side=tk.RIGHT)
         # sun / moon button flips light and dark mode
-        self.make_top_button(top_bar, "☀" if THEME == "dark" else "☾", ACCENT, self.switch_theme)
+        self.make_top_button(tools, "☀" if THEME == "dark" else "☾", ACCENT, self.switch_theme)
         # turn button: flat or standing up, only on an HDMI screen
         if self.hdmi != "":
-            self.make_top_button(top_bar, "⟳", ACCENT, self.switch_orientation)
-        tk.Label(top_bar, text="v" + VERSION, font=("Helvetica", 9), bg=BAR_BG, fg=MUTED).pack(side=tk.RIGHT, padx=px(4))
+            self.make_top_button(tools, "⟳", ACCENT, self.switch_orientation)
+        self.clock_lbl = tk.Label(tools, text="", font=("Helvetica", 12, "bold"), bg=BAR_BG, fg=TEXT)
+        self.clock_lbl.pack(side=tk.RIGHT, padx=px(6))
+        self.tick_clock()
         # both addresses, one per line, so you can see which one has an IP (and where to SSH)
-        addresses = tk.Frame(top_bar, bg=BAR_BG)
+        self.addresses = addresses = tk.Frame(top_bar, bg=BAR_BG)
         addresses.pack(side=tk.LEFT, padx=px(6))
         self.lan_lbl = tk.Label(addresses, text="", font=("Helvetica", 10, "bold"), bg=BAR_BG, fg=SOFT, anchor="w")
         self.lan_lbl.pack(fill=tk.X)
@@ -265,15 +315,16 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.wifi_ip_lbl.pack(fill=tk.X)
 
         # tabs along the bottom, packed before the arrows so they span the full width
-        tab_bar = tk.Frame(root, bg=BAR_BG)
-        tab_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        self.tab_buttons = {}
-        for name, text, command in (("cable", "LAN", self.open_cable), ("wifi", "Wi-Fi", self.open_wifi),
-                                    ("history", "History", self.open_history)):
-            button = self.on_tap(tk.Button(tab_bar, text=text, font=("Helvetica", 13, "bold"),
-                                           bd=0, relief=tk.FLAT, pady=px(7), highlightthickness=0), command)
-            button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1, pady=(1, 0))
-            self.tab_buttons[name] = button
+        # a canvas so the blue block can slide behind the words when you change tab
+        font = ("Helvetica", 13, "bold")
+        height = tkfont.Font(font=font).metrics("linespace") + 2 * px(8)
+        self.tab_bar = tk.Canvas(root, height=height, bg=BAR_BG, highlightthickness=0)
+        self.tab_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.tab_commands = [self.open_cable, self.open_wifi, self.open_history]
+        self.tab_font = font
+        self.tab_bar.bind("<Configure>", lambda event: self.color_tabs())
+        self.on_tap(self.tab_bar, lambda: self.tab_commands[min(2, self.tab_tap_x * 3 // max(1, self.tab_bar.winfo_width()))]())
+        self.tab_bar.bind("<ButtonPress-1>", lambda event: setattr(self, "tab_tap_x", event.x), add="+")
 
         # up/down arrows on the right side
         arrow_strip = tk.Frame(root, bg=BG, width=px(40))
@@ -326,6 +377,12 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.color_addresses()
         self.root.after(5000, self.refresh_ip)
 
+    # the time in the top bar, e.g. 11:42 PM
+    def tick_clock(self):
+        if self.clock_lbl.winfo_exists():
+            self.clock_lbl.config(text=time.strftime("%I:%M %p").lstrip("0"))
+            self.root.after(1000, self.tick_clock)
+
     # the address for the tab you're on is lit up: green with an IP, red without one.
     # The other one (and both on History) stays grey
     def color_addresses(self):
@@ -338,6 +395,28 @@ class FlukeApp(HistoryScreens, WifiScreens):
                 label.config(fg=MUTED)
 
     # --- UI BUILDERS ---
+
+    # a rounded button: a pill shaped picture behind the text, sized for `longest` so the text can
+    # change later (Rescan -> Starting...) without spilling out
+    def make_pill(self, parent, text, command, longest="", font=("Helvetica", 11, "bold"), color=None, pad=12,
+                  corners=(True, True, True, True), fg=None, max_width=None):
+        from PIL import Image, ImageDraw, ImageTk
+        color = color or BAR_BG
+        measure = tkfont.Font(font=font)
+        width = max(measure.measure(text), measure.measure(longest)) + 2 * px(pad)
+        width = min(width, max_width or width)
+        height = measure.metrics("linespace") + 2 * px(6)
+        drop = px(2)
+        big = Image.new("RGB", ((width + drop) * 4, (height + drop) * 4), parent.cget("bg"))   # drawn 4x then shrunk = smooth
+        draw = ImageDraw.Draw(big)
+        for offset, fill in ((drop * 4, SHADOW), (0, color)):
+            draw.rounded_rectangle((offset, offset, width * 4 - 1 + offset, height * 4 - 1 + offset),
+                                   radius=height * 2 - 2, fill=fill, corners=corners)
+        picture = ImageTk.PhotoImage(big.resize((width + drop, height + drop), Image.LANCZOS))
+        self.pills.append(picture)       # Tk forgets pictures nothing holds on to
+        pill = tk.Label(parent, text=text, image=picture, compound="center", font=font, fg=fg or TEXT,
+                        bg=parent.cget("bg"), bd=0)
+        return self.on_tap(pill, command)
 
     # a button in the top bar (exit, light/dark, turn), big enough to hit with a finger
     def make_top_button(self, top_bar, text, color, command):
@@ -356,11 +435,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
     # big dark touch button, caller packs it
     def make_button(self, parent, text, command, size=14):
-        return self.on_tap(tk.Button(
-            parent, text=text, font=("Helvetica", size, "bold"),
-            bg=BAR_BG, fg=TEXT, activebackground=PRESSED, activeforeground=TEXT,
-            padx=px(12), pady=px(6) if size >= 14 else px(4)
-        ), command)
+        # sized for the longest thing it will say (Scan -> Scanning...)
+        longer = {"↻ Scan": "Scanning...", "▶ Run": "Testing...", "2.4 GHz": "2.4 GHz"}.get(text, "")
+        return self.make_pill(parent, text, command, longest=longer, font=("Helvetica", size, "bold"))
 
     # title strip for the screens you open from a list, with a Back button
     def make_header(self, parent, text, back=None):
@@ -375,20 +452,29 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
     # two or three buttons side by side, the active one highlighted (Wi-Fi: Networks | Speed)
     def make_switcher(self, parent, options, active):
-        bar = tk.Frame(parent, bg=BG)
+        font = ("Helvetica", 11, "bold")
+        bar = tk.Canvas(parent, bg=BG, highlightthickness=0, height=tkfont.Font(font=font).metrics("linespace") + px(12))
         bar.pack(fill=tk.X, padx=px(6), pady=(px(4), px(2)))
-        for text, command in options:
-            on = text == active
-            self.on_tap(tk.Button(bar, text=text, font=("Helvetica", 11, "bold"), relief=tk.FLAT, bd=0,
-                                  bg=ACCENT if on else BAR_BG, fg=ON_ACCENT if on else TEXT, pady=px(6),
-                                  activebackground=ACCENT, highlightthickness=0),
-                        command).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1)
+        names = [text for text, command in options]
+        bar.bind("<Configure>", lambda event: draw_segments(bar, names, names.index(active), font, BG,
+                                                            (event.width, event.height)))
+        bar.bind("<ButtonPress-1>", lambda event: setattr(self, "tab_tap_x", event.x), add="+")
+        self.on_tap(bar, lambda: options[min(len(options) - 1, self.tab_tap_x * len(options) // max(1, bar.winfo_width()))][1]())
         return bar
 
     # big arrow button on the right strip, hold it to keep scrolling
     def make_arrow(self, parent, symbol, direction):
-        arrow = tk.Label(parent, text=symbol, font=("DejaVu Sans", 16, "bold"), bg=BAR_BG, fg=ACCENT, relief=tk.RAISED, bd=1)
-        arrow.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=px(2), pady=px(2))
+        # a rounded button drawn on a canvas, so it looks like the others
+        arrow = tk.Canvas(parent, bg=BG, highlightthickness=0, width=1, height=1)
+        arrow.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=px(3), pady=px(4))
+
+        def draw(color=BAR_BG):
+            arrow.delete("all")
+            width, height = arrow.winfo_width(), arrow.winfo_height()
+            round_rect(arrow, 0, 0, width, height, px(14), fill=color)
+            arrow.create_text(width / 2, height / 2, text=symbol, font=("DejaVu Sans", 16, "bold"), fill=ACCENT)
+        arrow.draw = draw
+        arrow.bind("<Configure>", lambda event: draw())
         arrow.bind("<ButtonPress-1>", lambda event: self.arrow_pressed(arrow, direction))
         arrow.bind("<ButtonRelease-1>", lambda event: self.arrow_released(arrow))
 
@@ -405,10 +491,32 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
     # a card with a small title, rows go in with make_row
     def make_card(self, parent, title, color=ACCENT):
-        card = tk.Frame(parent, bg=CARD_BG)
-        card.pack(fill=tk.X, padx=px(8), pady=px(5))
+        card = self.rounded_box(parent, padx=px(8), pady=px(5))
         tk.Label(card, text=title, font=("Helvetica", 12, "bold"), bg=CARD_BG, fg=color, anchor="w").pack(fill=tk.X, padx=px(10), pady=(px(6), px(2)))
         return card
+
+    # a box with rounded corners: a canvas draws the round shape, the frame it returns sits inside
+    def rounded_box(self, parent, padx=0, pady=0, radius=None, color=None):
+        r = radius or px(16)
+        color = color or CARD_BG
+        drop = px(3)                     # how far the shadow sits down and right
+        holder = tk.Canvas(parent, bg=parent.cget("bg"), highlightthickness=0, height=1)
+        holder.pack(fill=tk.X, padx=padx, pady=pady)
+        box = tk.Frame(holder, bg=color)
+        window = holder.create_window(r // 2, r // 2, window=box, anchor="nw")
+
+        def fit(event=None):
+            width = (event.width if event is not None and event.widget is holder else holder.winfo_width()) - drop
+            height = box.winfo_reqheight() + r
+            holder.config(height=height + drop)
+            holder.itemconfig(window, width=max(1, width - r))
+            holder.delete("shape")
+            round_rect(holder, drop, drop, width + drop, height + drop, r, fill=SHADOW, tags="shape")
+            round_rect(holder, 0, 0, width, height, r, fill=color, tags="shape")
+            holder.tag_lower("shape")
+        box.bind("<Configure>", fit, add="+")
+        holder.bind("<Configure>", fit)
+        return box
 
     # one "label   value" line in a card, returns the value label to fill in later
     def make_row(self, card, label, value="--"):
@@ -423,8 +531,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
     def build_scanner_ui(self):
         self.scanner_frame = tk.Frame(self.container, bg=BG)
 
-        self.status_label = tk.Label(self.scanner_frame, text="WAITING FOR CABLE...", font=("Helvetica", 18, "bold"),
-                                     bg=BAR_BG, fg=OK, pady=px(8))
+        status_box = self.rounded_box(self.scanner_frame, padx=px(8), pady=(px(6), 0), radius=px(22), color=BAR_BG)
+        self.status_label = tk.Label(status_box, text="WAITING FOR CABLE...", font=("Helvetica", 18, "bold"),
+                                     bg=BAR_BG, fg=OK, pady=px(2))
         self.status_label.pack(fill=tk.X)
 
         # ✓ Switch  ● DNS  ○ Ping  ○ Speed
@@ -482,12 +591,10 @@ class FlukeApp(HistoryScreens, WifiScreens):
         when = tk.Frame(self.scroll_content, bg=BG)
         when.pack(fill=tk.X, padx=px(8), pady=px(2))
         # buttons are packed first so they keep their size, the text gets whatever is left
-        self.rescan_button = self.make_button(when, "↻ Rescan", self.ask_restart, size=11)
+        self.rescan_button = self.make_pill(when, "↻ Rescan", self.ask_restart, longest="Starting...")
         self.rescan_button.pack(side=tk.RIGHT)
-        # send this scan to a phone as a PDF (share.py). Standing up it's at the bottom instead
-        if not self.portrait:
-            self.make_button(when, "QR", lambda: self.open_share(self.scan_results, "results"),
-                             size=11).pack(side=tk.RIGHT, padx=px(4))
+        # send this scan to a phone as a PDF (share.py)
+        self.make_pill(when, "QR", lambda: self.open_share(self.scan_results, "results")).pack(side=tk.RIGHT, padx=px(4))
         self.lbl_tested = tk.Label(when, text="Tested: --", font=("Helvetica", 10), bg=BG, fg=MUTED)
         self.lbl_tested.pack(side=tk.LEFT)
 
@@ -502,6 +609,10 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_switch_ip = self.make_row(switch, "Switch IP")
         self.res_proto = self.make_row(switch, "Found via")
         tk.Frame(switch, bg=CARD_BG, height=px(6)).pack()
+
+        network = self.make_card(self.scroll_content, "Network")
+        self.res_net = {key: self.make_row(network, label) for label, key in NETWORK_ROWS}
+        tk.Frame(network, bg=CARD_BG, height=px(6)).pack()
 
         dns = self.make_card(self.scroll_content, "DNS")
         self.res_dns_server = self.make_row(dns, "Server")
@@ -518,17 +629,10 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_loss = self.make_row(speed, "Packet loss")
         self.res_rating = self.make_row(speed, "Rating")
         self.res_server = self.make_row(speed, "Server")
+        self.res_public = self.make_row(speed, "Public IP")
+        self.res_isp = self.make_row(speed, "ISP")
         tk.Frame(speed, bg=CARD_BG, height=px(6)).pack()
 
-        # standing up there's room for the QR right here
-        self.results_qr = None
-        if self.portrait:
-            card = tk.Frame(self.scroll_content, bg=CARD_BG)
-            card.pack(fill=tk.X, padx=px(8), pady=px(5))
-            self.results_qr = tk.Canvas(card, width=px(150), height=px(150), bg="white", highlightthickness=0)
-            self.results_qr.pack(pady=px(8))
-            self.results_qr_lbl = tk.Label(card, text="", font=("Helvetica", 10), bg=CARD_BG, fg=MUTED)
-            self.results_qr_lbl.pack()
 
 
     # --- EVENT HANDLERS ---
@@ -539,6 +643,8 @@ class FlukeApp(HistoryScreens, WifiScreens):
     # tap ✕: it shows "Start screen" and "Terminal" for a few seconds, tap one to close the app
     def exit_pressed(self):
         self.exit_armed = True
+        self.top_tools.pack_forget()
+        self.addresses.pack_forget()
         self.exit_button.pack_forget()
         self.exit_choices.pack(side=tk.RIGHT)
         self.root.after(4000, self.disarm_exit)
@@ -662,22 +768,35 @@ class FlukeApp(HistoryScreens, WifiScreens):
                 self.show_detail_ui(state["detail"])
         self.restored_view = view
 
-    # the logo was tapped: ask before starting the test over
+    # the logo or Rescan was tapped: ask before starting the test over
     def ask_restart(self):
-        if getattr(self, "restart_box", None) is not None:
-            return
-        box = tk.Frame(self.root, bg=CARD_BG, highlightthickness=px(2), highlightbackground=ACCENT)
-        tk.Label(box, text="Restart the test?", font=("Helvetica", 15, "bold"), bg=CARD_BG,
+        self.ask("Restart the test?", "Restart", self.restart_test)
+
+    def ask_shutdown(self):
+        self.disarm_exit()
+        self.ask("Shut down the Pi?", "Shut down", self.shut_down, BAD)
+
+    # turns the Pi off properly (everything saved first), the safe way to power it off
+    def shut_down(self):
+        self.close_restart_box()
+        logger.info("shut down from the screen")
+        subprocess.Popen(["systemctl", "poweroff"])
+
+    # a box in the middle: question, a yes button and Cancel
+    def ask(self, question, yes_text, yes_command, color=None):
+        self.close_restart_box()     # the newest question replaces any open one
+        box = tk.Frame(self.root, bg=CARD_BG, highlightthickness=px(2), highlightbackground=color or ACCENT)
+        tk.Label(box, text=question, font=("Helvetica", 15, "bold"), bg=CARD_BG,
                  fg=TEXT).pack(padx=px(20), pady=(px(14), px(10)))
         buttons = tk.Frame(box, bg=CARD_BG)
         buttons.pack(pady=(0, px(14)))
-        self.make_button(buttons, "Restart", self.restart_test).pack(side=tk.LEFT, padx=px(8))
+        self.make_button(buttons, yes_text, yes_command).pack(side=tk.LEFT, padx=px(8))
         self.make_button(buttons, "Cancel", self.close_restart_box).pack(side=tk.LEFT, padx=px(8))
         box.place(relx=0.5, rely=0.5, anchor="center")
         self.restart_box = box
 
     def close_restart_box(self):
-        if self.restart_box is not None:
+        if getattr(self, "restart_box", None) is not None:
             self.restart_box.destroy()
             self.restart_box = None
 
@@ -713,15 +832,19 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.exit_armed = False
         self.exit_choices.pack_forget()
         self.exit_button.pack(side=tk.RIGHT, padx=px(2))
+        self.top_tools.pack(side=tk.RIGHT, after=self.exit_slot)
+        self.addresses.pack(side=tk.LEFT, padx=px(6), after=self.logo_lbl)
 
     # four boxes (Link / Switch / DNS / Internet), tap one for its log. record() gives the scan
     def make_summary_row(self, parent, record, came_from):
         labels = []
         for k, key in enumerate(SUMMARY_KEYS):
-            label = tk.Label(parent, text="", font=("DejaVu Sans", 11, "bold"), bg=CARD_BG, fg=MUTED, pady=px(6))
-            label.grid(row=0, column=k, sticky="ew", padx=px(2))
+            label = self.make_pill(parent, "", lambda key=key: self.show_step_log(record(), key, came_from),
+                                   longest="● Internet", font=("DejaVu Sans", 11, "bold"), color=CARD_BG, pad=14,
+                                   corners=(False, True, True, False),   # square left, round right
+                                   max_width=(self.screen_width - px(60)) // 4 - px(6))
+            label.grid(row=0, column=k, padx=px(2))
             parent.columnconfigure(k, weight=1)
-            self.on_tap(label, lambda key=key: self.show_step_log(record(), key, came_from))
             labels.append(label)
         return labels
 
@@ -788,32 +911,6 @@ class FlukeApp(HistoryScreens, WifiScreens):
             return
         self.root.after(0, self.show_share, interface, matrix)
 
-    # the QR at the bottom of the results (standing up)
-    def make_results_qr(self, record):
-        from .share import share_record, qr_matrix
-        try:
-            aps, wifi_stamp = self.wifi_for_pdf()
-            url, interface = share_record(record, aps, wifi_stamp)
-            matrix = qr_matrix(url)
-        except Exception as err:
-            logger.exception("could not make the results QR")
-            message = f"No QR: {err}"
-            self.root.after(0, lambda: self.results_qr_lbl.config(text=message, fg=BAD))
-            return
-        self.root.after(0, self.show_results_qr, interface, matrix)
-
-    def show_results_qr(self, interface, matrix):
-        if self.results_qr is None or not self.results_qr.winfo_exists():
-            return
-        # as big as fits without having to scroll down to it
-        self.root.update_idletasks()
-        rest = self.scroll_content.winfo_reqheight() - self.results_qr.winfo_reqheight()
-        space = self.scroll_canvas.winfo_height() - rest - px(8)
-        size = max(px(110), min(self.scroll_canvas.winfo_width() - px(60), space))
-        self.results_qr.config(width=size, height=size)
-        self.results_qr_lbl.pack_forget()
-        self.draw_qr(matrix, self.results_qr, size)
-
     # the Wi-Fi tab's last scan for the PDF's channel map, or a fresh scan if there isn't one yet
     def wifi_for_pdf(self):
         if len(self.wifi_aps) > 0:
@@ -833,7 +930,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.qr_canvas.pack_forget()
         self.share_lbl.pack_forget()
         # just the QR, as big as fits, in the middle. The text only says "Making the PDF..." or an error
-        self.qr_size = min(width, height) - px(10)
+        self.qr_size = min(width, height - px(28)) - px(10)
         self.qr_canvas.config(width=self.qr_size, height=self.qr_size)
         self.share_lbl.config(wraplength=width - px(8))
         self.share_lbl.pack(side=tk.BOTTOM)
@@ -893,7 +990,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
     # scroll once, then keep going while held
     def arrow_pressed(self, arrow, direction):
-        arrow.config(bg=PRESSED, relief=tk.SUNKEN)
+        arrow.draw(PRESSED)
         self.arrow_direction = direction
         if self.current_view == "history":
             self.scroll_by(direction)      # history is paged, so no repeat
@@ -906,7 +1003,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.arrow_job = self.root.after(15, self.arrow_repeat)
 
     def arrow_released(self, arrow):
-        arrow.config(bg=BAR_BG, relief=tk.RAISED)
+        arrow.draw()
         if getattr(self, "arrow_job", None) is not None:
             self.root.after_cancel(self.arrow_job)
             self.arrow_job = None
@@ -920,8 +1017,16 @@ class FlukeApp(HistoryScreens, WifiScreens):
     # finger lifted: the next touch starts fresh
     def drag_end(self, event):
         self.finger_down = False
+        # History has pages instead of scrolling: a swipe up is the next page, down the one before
+        moved = event.y_root - self.drag_start_y
+        if self.current_view == "history" and abs(moved) > px(50):
+            self.drag_moved = True
+            self.history_older() if moved < 0 else self.history_newer()
 
     def drag_move(self, event):
+        # a swipe on History isn't a tap on the row under the finger
+        if self.current_view == "history" and abs(event.y_root - self.drag_start_y) > px(14):
+            self.drag_moved = True
         canvas = self.scroll_canvases.get(self.current_view)
         if canvas is None:
             return
@@ -942,22 +1047,72 @@ class FlukeApp(HistoryScreens, WifiScreens):
         # is a new touch somewhere else, not a swipe, so it doesn't move the page
         moved = self.drag_last_y - event.y_root
         if abs(moved) < px(120):
-            canvas.yview_scroll(moved, "units")
+            canvas.yview_scroll(moved * 2, "units")     # twice the finger, so long pages are quick
         self.drag_last_y = event.y_root
 
     # --- UI STATE MANAGERS ---
 
     # swap whatever screen is showing for `frame` and light up its tab
     def show_frame(self, frame, view):
+        old = self.visible_frame if hasattr(self, "visible_frame") and self.visible_frame.winfo_exists() else None
+        old_tab = VIEW_TAB.get(self.current_view)
+        direction = SLIDE_ORDER.get(view, -1) - SLIDE_ORDER.get(self.current_view, -1)
+        self.end_slide()
         for other in self.frames:
             other.pack_forget()
-        frame.pack(expand=True, fill=tk.BOTH)
+        self.visible_frame = frame
+        # tabs and their pages slide in from the side they're on, everything else just appears
+        if old is not None and old is not frame and view in SLIDE_ORDER and self.current_view in SLIDE_ORDER:
+            self.slide(old, frame, 1 if direction > 0 else -1, 0)
+        else:
+            frame.pack(expand=True, fill=tk.BOTH)
         self.current_view = view
         self.color_addresses()
-        for name, button in self.tab_buttons.items():
-            on = name == VIEW_TAB[view]
-            button.config(bg=ACCENT if on else BAR_BG, fg=ON_ACCENT if on else TEXT,
-                          activebackground=ACCENT if on else PRESSED)
+        # the blue block slides over to the new tab
+        if old is not None and old_tab != VIEW_TAB[view]:
+            self.slide_tab(TAB_NAMES.index(old_tab), TAB_NAMES.index(VIEW_TAB[view]), 0)
+        else:
+            self.color_tabs()
+
+    # blue block under the tab you're on (position = which third, can be in between while sliding)
+    def color_tabs(self, position=None):
+        position = TAB_NAMES.index(self.current_tab()) if position is None else position
+        draw_segments(self.tab_bar, ["LAN", "Wi-Fi", "History"], position, self.tab_font, BG,
+                      (self.tab_bar.winfo_width(), self.tab_bar.winfo_height()))
+
+    def slide_tab(self, start, end, step, steps=9):
+        progress = 1 - (1 - step / steps) ** 2
+        self.color_tabs(start + (end - start) * progress)
+        if step < steps:
+            self.root.after(15, self.slide_tab, start, end, step + 1)
+
+    # moves the old page out and the new one in, a bit every 15 ms
+    def slide(self, old, new, direction, step, steps=7):
+        progress = 1 - (1 - step / steps) ** 2          # starts fast, slows down at the end
+        if step == 0:
+            # lay out and draw the new page once, off to the side, so moving it is just moving
+            new.place(in_=self.container, relx=direction, rely=0, relwidth=1, relheight=1)
+            self.root.update_idletasks()
+        if step == 0:
+            old.place(in_=self.container, relx=0, rely=0, relwidth=1, relheight=1)
+            new.lift()
+        new.place(in_=self.container, relx=direction * (1 - progress), rely=0, relwidth=1, relheight=1)
+        if step < steps:
+            self.slide_job = self.root.after(15, self.slide, old, new, direction, step + 1)
+        else:
+            self.end_slide()
+
+    # stop a slide and leave just the new page showing
+    def end_slide(self):
+        if getattr(self, "slide_job", None) is not None:
+            self.root.after_cancel(self.slide_job)
+        self.slide_job = None
+        for frame in self.frames:
+            if frame.winfo_manager() == "place":
+                frame.place_forget()
+        shown = getattr(self, "visible_frame", None)
+        if shown is not None and shown.winfo_exists() and not shown.winfo_manager():
+            shown.pack(expand=True, fill=tk.BOTH)
 
     def current_tab(self):
         return VIEW_TAB[self.current_view]
@@ -1005,6 +1160,8 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_link.config(text=results["link_speed"])
         self.res_switch_ip.config(text=results["switch_ip"])
         self.res_proto.config(text=results["switch_proto"])
+        for key, label in self.res_net.items():
+            label.config(text=results.get(key, "--"))
         self.res_dns_server.config(text=results["dns_server"])
         self.res_dns_time.config(text=results["dns_time"])
         self.res_dns_seen.config(text=f"{results['dns_queries']}  (last: {results['dns_last_domain']})")
@@ -1015,12 +1172,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.res_loss.config(text=results["ping_loss"])
         self.res_rating.config(text=results["speed_rating"])
         self.res_server.config(text=results.get("speed_server", "--"))
+        self.res_public.config(text=results.get("public_ip", "--"))
+        self.res_isp.config(text=results.get("isp", "--"))
         self.cable_graph.show(results, self.speed_curves)
-        if self.results_qr is not None:
-            self.results_qr.delete("all")
-            self.results_qr_lbl.config(text="Making the PDF...", fg=MUTED)
-            self.results_qr_lbl.pack()
-            threading.Thread(target=self.make_results_qr, args=(dict(results),), daemon=True).start()
 
         self.cable_view = "results"
         if self.current_tab() == "cable":
@@ -1215,6 +1369,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
             # 3. DNS lookup out the test port + 3s of sniffing
             self.root.after(0, self.update_scanner, testing, TEXT, 1)
             self.log_part = "DNS"
+            self.scan_results.update(network_info())
+            for label, key in NETWORK_ROWS:
+                self.info(f"{label}: {self.scan_results.get(key, '--')}")
             try:
                 run_dns_test(self.scan_results, on_line=self.info)
             except Exception:

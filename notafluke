@@ -139,7 +139,9 @@ autostart() {
   cat > /etc/systemd/system/notafluke.service <<UNIT
 [Unit]
 Description=Not-A-Fluke touchscreen GUI
-After=systemd-user-sessions.service lldpd.service plymouth-quit-wait.service getty@tty1.service
+After=systemd-user-sessions.service lldpd.service plymouth-quit-wait.service
+# before the login prompt, so the start screen is up first and the prompt never shows over it
+Before=getty@tty1.service
 
 [Service]
 Type=simple
@@ -168,7 +170,7 @@ closed_screen() {
   TFT_NUM=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5 | tr -d fb)
   console_bind 1
   if [ -z "$TFT_NUM" ] || [ -n "$HDMI" ]; then
-    chvt 2 2>/dev/null; sleep 0.3; chvt 1 2>/dev/null; return   # HDMI screen: just bring the console back
+    return   # HDMI screen: the start screen or the terminal switch to their own console
   fi
   dd if=/dev/zero of=/dev/fb$TFT_NUM bs=64k status=none 2>/dev/null
   # put tty1-6 on the small screen (matters when HDMI is fb0 and the small screen is fb1)
@@ -184,18 +186,22 @@ closed_screen() {
 # the 7 inch screen's start screen: logo, Wi-Fi and cable status (kept up to date), and a tap
 # starts the GUI
 start_screen() {
-  TERM=linux setterm --cursor off </dev/tty1 >/dev/tty1 2>/dev/null
-  printf '\033[2J' > /dev/tty1
+  # tty12 has no login prompt on it, so nothing gets typed over the picture, and no cursor
+  chvt 12 2>/dev/null
+  TERM=linux setterm --cursor off </dev/tty12 >/dev/tty12 2>/dev/null
+  printf '\033[2J' > /dev/tty12
   python3 "$DIR/fluke/splash.py" --live &
   SPLASH=$!
   python3 "$DIR/fluke/tap.py"
   TAPPED=$?
   kill $SPLASH 2>/dev/null
+  # the raspberry jingles while the app loads (the app stops it when it's up)
+  [ $TAPPED = 0 ] && python3 "$DIR/fluke/splash.py" --starting &
   [ $TAPPED = 0 ] && exec "$SELF" gui
 }
 
 case "$1" in
-  stop) stop; sleep 1; closed_screen
+  stop) stop; sleep 1; closed_screen; chvt 1 2>/dev/null
         TERM=linux setterm --cursor on </dev/tty1 >/dev/tty1 2>/dev/null
         echo "Not-A-Fluke stopped."; exit 0 ;;
   # from the shutdown service: stop the console drawing on the small screen and paint it black,
@@ -327,7 +333,6 @@ if [ -n "$HDMI" ] && [ -s /etc/pi-fluke-touch-hdmi.json ]; then
 Section "InputClass"
     Identifier   "notafluke hdmi touch"
     MatchProduct "TSTP MTouch"
-    MatchIsTouchscreen "on"
     Driver       "libinput"
     Option       "CalibrationMatrix" "$MATRIX"
 EndSection
@@ -340,6 +345,7 @@ SESSION_CMD="python3 -m fluke"
 cat > "$CONF_DIR/session" <<EOF
 #!/bin/sh
 rm -f /tmp/notafluke-replaced
+pkill -f "fluke/splash.py" 2>/dev/null   # the loading jingle, the app is taking over the screen
 xset s off -dpms 2>/dev/null
 # at boot the console can still write onto the screen for a few seconds after the GUI is up,
 # and X doesn't know, so bits (like the arrows) stay missing until tapped. Repaint everything a few times
@@ -362,6 +368,7 @@ wait_for_tap() {
   # ✕ -> Terminal: the command line, with a tap-to-start bar on the bottom line
   if [ "$(cat /tmp/notafluke-exit 2>/dev/null)" = "terminal" ]; then
     rm -f /tmp/notafluke-exit
+    chvt 1 2>/dev/null
     TERM=linux setterm --cursor on </dev/tty1 >/dev/tty1 2>/dev/null
     printf '\033[999;1H\033[7m   TAP HERE TO START NOT-A-FLUKE   \033[0m' > /dev/tty1
     python3 "$DIR/fluke/tap.py" || return

@@ -9,6 +9,7 @@ import glob
 EVENT = struct.Struct("llHHi")
 EV_KEY = 1
 BTN_TOUCH = 330
+BTN_LEFT = 272       # the 7 inch panel sometimes starts up as a mouse, then a tap is a click
 
 
 # the touchscreens' /dev/input/eventN (the small screen, or the 7 inch one, which has two)
@@ -33,7 +34,7 @@ def main():
             data = touch.read(EVENT.size)
             seconds, micros, kind, code, value = EVENT.unpack(data)
             # finger lifted off the screen = one tap
-            if kind == EV_KEY and code == BTN_TOUCH and value == 0:
+            if kind == EV_KEY and code in (BTN_TOUCH, BTN_LEFT) and value == 0:
                 return
 
 

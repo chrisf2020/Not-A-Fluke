@@ -59,7 +59,7 @@ def poll():
                 state["x"] = (event.value - x_info.min) / (x_info.max - x_info.min)
             elif event.type == ecodes.EV_ABS and event.code == ecodes.ABS_Y:
                 state["y"] = (event.value - y_info.min) / (y_info.max - y_info.min)
-            elif event.type == ecodes.EV_KEY and event.code == ecodes.BTN_TOUCH:
+            elif event.type == ecodes.EV_KEY and event.code in (ecodes.BTN_TOUCH, ecodes.BTN_LEFT):
                 if event.value == 1:
                     state["down"] = True
                 elif state["down"] and state["x"] is not None:   # finger lifted = one tap

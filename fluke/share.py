@@ -36,10 +36,12 @@ _server = None
 _secure_server = None
 
 
-# e.g. scan-2026-10-28_12-59-29.pdf
+# e.g. scan-2026-10-28_12-59-29-k3x9q2ab.pdf. The random bit at the end means nobody on the
+# network can guess the link to someone else's report
 def report_filename(record):
+    import secrets
     stamp = str(record.get("started_at") or "unknown").replace("T", "_").replace(":", "-")
-    return f"scan-{stamp}.pdf"
+    return f"scan-{stamp}-{secrets.token_hex(4)}.pdf"
 
 
 # colours on the white page

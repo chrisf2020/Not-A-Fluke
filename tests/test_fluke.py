@@ -207,13 +207,17 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(len(records), config.MAX_SCAN_RECORDS)
             self.assertEqual(records[0]["n"], config.MAX_SCAN_RECORDS + 4)   # newest first
 
+    def test_best_channel(self):
+        aps = [{"freq": 2412, "signal": -40, "width": "20 MHz"}, {"freq": 2437, "signal": -50, "width": "20 MHz"}]
+        self.assertEqual(graph.best_channel(aps, "2.4"), 11)
+
     def test_speed_groups(self):
         lan = [{"switch_name": "SW1", "speed_down": "20.0 Mbps", "speed_up": "5.0 Mbps"},
                {"switch_name": "SW1", "speed_down": "Failed"},
                {"switch_name": "SW1", "speed_down": "10.0 Mbps", "speed_up": "2.0 Mbps"}]
         wifi = [{"ssid": "Home", "speed_down": "50.0 Mbps", "speed_up": "9.0 Mbps"}]
         self.assertEqual(history.speed_groups(lan, wifi),
-                         [("LAN  SW1", [(10.0, 2.0), (20.0, 5.0)]), ("Wi-Fi  Home", [(50.0, 9.0)])])
+                         [("LAN  SW1", [(10.0, 2.0, ""), (20.0, 5.0, "")]), ("Wi-Fi  Home", [(50.0, 9.0, "")])])
 
     def test_summary(self):
         record = {"complete": False, "started_at": "2026-09-30T14:05:12", "switch_name": "SWITCH-01",
@@ -274,7 +278,9 @@ class ShareTests(unittest.TestCase):
     RECORD = {"started_at": "2026-10-28T12:59:29", "switch_name": "SW-01", "speed_down": "93.4 Mbps"}
 
     def test_report_filename_has_no_colons(self):
-        self.assertEqual(share.report_filename(self.RECORD), "scan-2026-10-28_12-59-29.pdf")
+        name = share.report_filename(self.RECORD)
+        self.assertTrue(name.startswith("scan-2026-10-28_12-59-29-") and name.endswith(".pdf"))
+        self.assertNotIn(":", name)
 
     def test_build_pdf_makes_a_pdf(self):
         with tempfile.TemporaryDirectory() as folder:

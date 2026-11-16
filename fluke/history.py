@@ -168,10 +168,11 @@ DETAIL_GROUPS = [
     ("Switch", [("Switch", "switch_name"), ("Port", "switch_port"), ("VLAN", "switch_vlan"),
                 ("Voice VLAN", "switch_voice"), ("PoE", "switch_poe"), ("Link", "link_speed"),
                 ("Switch IP", "switch_ip"), ("Found via", "switch_proto")]),
+    ("Network", [("Pi's IP", "lan_ip"), ("Gateway", "gateway"), ("DHCP server", "dhcp_server"), ("Lease", "lease")]),
     ("DNS", [("Server", "dns_server"), ("Answer", "dns_time")]),
     ("Speed", [("Download", "speed_down"), ("Upload", "speed_up"), ("Ping", "ping_latency"),
                ("Jitter", "ping_jitter"), ("Packet loss", "ping_loss"), ("Rating", "speed_rating"),
-               ("Server", "speed_server")]),
+               ("Server", "speed_server"), ("Public IP", "public_ip"), ("ISP", "isp")]),
 ]
 
 
@@ -185,7 +186,8 @@ def speed_groups(lan_records, wifi_records):
             down = read_number(record.get("speed_down"))
             if down is not None:
                 title = f"{kind}  {record.get(key, '--')}"
-                groups.setdefault(title, []).append((down, read_number(record.get("speed_up")) or 0))
+                groups.setdefault(title, []).append((down, read_number(record.get("speed_up")) or 0,
+                                                     record.get("started_at", "")))
     return list(groups.items())
 
 
@@ -242,7 +244,7 @@ class HistoryScreens:
                      bg=BG, fg=MUTED).pack(pady=px(40))
         for title, tests in groups:
             card = self.make_card(self.speed_history_inner, title)
-            down, up = tests[-1]
+            down, up = tests[-1][:2]
             tk.Label(card, text=f"{len(tests)} tests   last: {down:g} down / {up:g} up Mbps", font=("Helvetica", 10),
                      bg=CARD_BG, fg=MUTED, anchor="w").pack(fill=tk.X, padx=px(10))
             chart = tk.Canvas(card, height=px(140), bg=CARD_BG, highlightthickness=0)
@@ -265,11 +267,11 @@ class HistoryScreens:
         self.history_records = load_scan_history()[:MAX_SCAN_RECORDS]
         self.history_page = 0
         self.show_history_frame()
-        # how many rows fit depends on the screen (about px(47) each)
+        # how many rows fit depends on the screen (about px(53) each)
         self.root.update_idletasks()
         height = self.history_rows.winfo_height()
         if height > 1:
-            self.history_page_size = max(3, height // px(47))
+            self.history_page_size = max(3, height // px(53))
         self.render_history_page()
 
     def show_history_frame(self):
@@ -300,8 +302,7 @@ class HistoryScreens:
     # when, download speed in the same colour
     def make_history_row(self, record):
         color = record_color(record)
-        row = tk.Frame(self.history_rows, bg=CARD_BG)
-        row.pack(fill=tk.X, pady=px(2))
+        row = self.rounded_box(self.history_rows, pady=px(2), radius=px(22))
         stripe = tk.Frame(row, bg=color, width=px(6))
         stripe.pack(side=tk.LEFT, fill=tk.Y)
 
