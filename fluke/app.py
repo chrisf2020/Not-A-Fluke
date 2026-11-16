@@ -31,7 +31,11 @@ SCAN_STEPS = ["Switch", "DNS", "Ping", "Speed"]
 # which tab each screen belongs to
 VIEW_TAB = {"scanner": "cable", "results": "cable", "cable_speed": "cable", "wifi": "wifi", "ap": "wifi",
             "wifi_speed": "wifi", "channels": "wifi", "history": "history", "detail": "history",
-            "share_cable": "cable", "share_history": "history", "speed_history": "history"}
+            "share_cable": "cable", "share_history": "history", "speed_history": "history",
+            "log_cable": "cable", "log_history": "history"}
+
+# the coloured boxes at the top of the results, tap one to see what that part of the test saw
+SUMMARY_KEYS = ["Link", "Switch", "DNS", "Internet"]
 
 
 # blank scan record. "--" while waiting, then each test starts as "Failed" until it passes
@@ -291,14 +295,16 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.build_wifi_speed_ui()
         self.build_wifi_channels_ui()
         self.build_share_ui()
+        self.build_log_ui()
         self.frames = [self.scanner_frame, self.results_frame, self.cable_speed_frame, self.history_frame,
                        self.detail_frame, self.wifi_frame, self.ap_frame, self.wifi_speed_frame,
-                       self.channels_frame, self.share_frame, self.speed_history_frame]
+                       self.channels_frame, self.share_frame, self.speed_history_frame, self.log_frame]
         self.scroll_canvases = {"results": self.scroll_canvas, "cable_speed": self.cable_speed_canvas,
                                 "detail": self.detail_canvas,
                                 "wifi": self.wifi_canvas, "ap": self.ap_canvas,
                                 "wifi_speed": self.wifi_speed_canvas,
-                                "speed_history": self.speed_history_canvas}
+                                "speed_history": self.speed_history_canvas,
+                                "log_cable": self.log_canvas, "log_history": self.log_canvas}
         self.show_scanner_ui()
 
     # refresh the top bar addresses every 5s in case the cable goes in later
@@ -471,12 +477,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
         # pass / fail at a glance
         summary = tk.Frame(self.scroll_content, bg=BG)
         summary.pack(fill=tk.X, padx=px(8), pady=(px(8), px(2)))
-        self.summary_labels = []
-        for k in range(4):
-            label = tk.Label(summary, text="", font=("DejaVu Sans", 11, "bold"), bg=CARD_BG, fg=MUTED, pady=px(4))
-            label.grid(row=0, column=k, sticky="ew", padx=px(2))
-            summary.columnconfigure(k, weight=1)
-            self.summary_labels.append(label)
+        self.summary_labels = self.make_summary_row(summary, lambda: self.scan_results, "results")
 
         when = tk.Frame(self.scroll_content, bg=BG)
         when.pack(fill=tk.X, padx=px(8), pady=px(2))
@@ -712,6 +713,39 @@ class FlukeApp(HistoryScreens, WifiScreens):
         self.exit_armed = False
         self.exit_choices.pack_forget()
         self.exit_button.pack(side=tk.RIGHT, padx=px(2))
+
+    # four boxes (Link / Switch / DNS / Internet), tap one for its log. record() gives the scan
+    def make_summary_row(self, parent, record, came_from):
+        labels = []
+        for k, key in enumerate(SUMMARY_KEYS):
+            label = tk.Label(parent, text="", font=("DejaVu Sans", 11, "bold"), bg=CARD_BG, fg=MUTED, pady=px(6))
+            label.grid(row=0, column=k, sticky="ew", padx=px(2))
+            parent.columnconfigure(k, weight=1)
+            self.on_tap(label, lambda key=key: self.show_step_log(record(), key, came_from))
+            labels.append(label)
+        return labels
+
+    # what one part of the test printed while it ran (saved with the scan)
+    def build_log_ui(self):
+        self.log_frame = tk.Frame(self.container, bg=BG)
+        self.log_header = self.make_header(self.log_frame, "", back=lambda: self.log_back())
+        self.log_title = self.log_header.winfo_children()[-1]
+        self.log_canvas, inner = self.make_scroll_area(self.log_frame)
+        self.log_lbl = tk.Label(inner, text="", font=("DejaVu Sans Mono", 11), bg=BG, fg=TEXT,
+                                justify=tk.LEFT, anchor="nw")
+        self.log_lbl.pack(fill=tk.BOTH, padx=px(12), pady=px(6))
+
+    def show_step_log(self, record, key, came_from):
+        lines = record.get("log", {}).get(key) or ["Nothing saved for this part (older scan)"]
+        self.log_title.config(text=f"{key} log")
+        self.log_lbl.config(text="\n".join(lines), wraplength=self.container.winfo_width() - px(30))
+        if came_from == "results":
+            self.log_back = self.show_cable_results
+            self.show_frame(self.log_frame, "log_cable")
+        else:
+            self.log_back = lambda: self.show_frame(self.detail_frame, "detail")
+            self.show_frame(self.log_frame, "log_history")
+        self.log_canvas.yview_moveto(0)
 
     # --- SEND TO PHONE (QR code -> PDF, see share.py) ---
 
@@ -1074,9 +1108,13 @@ class FlukeApp(HistoryScreens, WifiScreens):
         except OSError:
             return False
 
-    # one line under the steps, from the test thread
+    # one line under the steps, from the test thread. Also saved with the scan (see SUMMARY_KEYS)
     def info(self, line):
+        self.log(line)
         self.root.after(0, self.add_ping_line, line)
+
+    def log(self, line):
+        self.scan_results.setdefault("log", {}).setdefault(self.log_part, []).append(line)
 
     # check lldpd once a second (switch.py). it's always running so usually the
     # first check already has data. returns False on timeout or cable pulled.
@@ -1153,7 +1191,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
             # 2. find the switch (up to SWITCH_DISCOVERY_TIMEOUT)
             self.root.after(0, self.update_scanner, testing, TEXT, 0)
+            self.log_part = "Link"
             self.info(f"Link up: {self.scan_results['link_speed']}")
+            self.log_part = "Switch"
             self.info("Listening for the switch (CDP / LLDP)...")
             switch_found = self.discover_switch_topology()
             if not self.is_cable_connected():
@@ -1174,6 +1214,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
             # 3. DNS lookup out the test port + 3s of sniffing
             self.root.after(0, self.update_scanner, testing, TEXT, 1)
+            self.log_part = "DNS"
             try:
                 run_dns_test(self.scan_results, on_line=self.info)
             except Exception:
@@ -1185,6 +1226,7 @@ class FlukeApp(HistoryScreens, WifiScreens):
 
             # 3b. ~4s of pings for latency, jitter and loss
             self.root.after(0, self.update_scanner, testing, TEXT, 2)
+            self.log_part = "Internet"
             run_ping_test(self.scan_results, on_line=self.info)
             if not self.is_cable_connected():
                 self.finish_scan(False)
@@ -1195,8 +1237,9 @@ class FlukeApp(HistoryScreens, WifiScreens):
             self.root.after(0, self.start_loading_animation, "Connecting to closest server...")
             self.speed_curves = run_bandwidth_test(
                 self.scan_results, INTERFACE,
-                on_status=lambda text: self.root.after(0, self.set_loading_message, text)
+                on_status=lambda text: (self.log(text), self.root.after(0, self.set_loading_message, text))
             )
+            self.log(f"Download {self.scan_results['speed_down']}, upload {self.scan_results['speed_up']}")
             # saved with the scan so the PDF can draw the speed graph, even from History
             self.scan_results["speed_curves"] = self.speed_curves
 

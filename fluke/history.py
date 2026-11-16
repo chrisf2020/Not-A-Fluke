@@ -245,7 +245,7 @@ class HistoryScreens:
             down, up = tests[-1]
             tk.Label(card, text=f"{len(tests)} tests   last: {down:g} down / {up:g} up Mbps", font=("Helvetica", 10),
                      bg=CARD_BG, fg=MUTED, anchor="w").pack(fill=tk.X, padx=px(10))
-            chart = tk.Canvas(card, height=px(90), bg=CARD_BG, highlightthickness=0)
+            chart = tk.Canvas(card, height=px(140), bg=CARD_BG, highlightthickness=0)
             chart.pack(fill=tk.X, padx=px(6), pady=px(6))
             chart.bind("<Configure>", lambda event, c=chart, t=tests: draw_history_chart(c, event.width, event.height, t))
         self.show_frame(self.speed_history_frame, "speed_history")
@@ -347,6 +347,13 @@ class HistoryScreens:
         self.detail_record = record
         for child in self.detail_inner.winfo_children():
             child.destroy()
+
+        # the same Link / Switch / DNS / Internet boxes as the results, tap one for its log
+        from .app import scan_summary
+        summary = tk.Frame(self.detail_inner, bg=BG)
+        summary.pack(fill=tk.X, padx=px(8), pady=(px(6), 0))
+        for label, (text, color) in zip(self.make_summary_row(summary, lambda: record, "detail"), scan_summary(record)):
+            label.config(text="● " + text, fg=color)
 
         scan = self.make_card(self.detail_inner, "Scan")
         self.make_row(scan, "Started", format_stamp(record.get("started_at")))

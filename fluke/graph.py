@@ -217,11 +217,21 @@ class MetricsGraph:
 # a small graph of past speed tests: download and upload lines, oldest on the left
 def draw_history_chart(canvas, width, height, tests):
     canvas.delete("all")
-    left, right, top, bottom = px(34), width - px(8), px(8), height - px(6)
+    left, right, top, bottom = px(40), width - px(8), px(24), height - px(30)
     highest = max(max(down, up) for down, up in tests) * 1.15 or 1
-    canvas.create_text(left - px(4), top, text=f"{highest:.0f}", anchor="ne", fill=MUTED, font=("Helvetica", 8))
-    canvas.create_text(left - px(4), bottom, text="0", anchor="se", fill=MUTED, font=("Helvetica", 8))
-    canvas.create_line(left, bottom, right, bottom, fill=LINE)
+    # key: which colour is which
+    canvas.create_text(left, px(2), text="● Download", anchor="nw", fill=DOWN_COLOR, font=("Helvetica", 9, "bold"))
+    canvas.create_text(left + px(90), px(2), text="● Upload", anchor="nw", fill=UP_COLOR, font=("Helvetica", 9, "bold"))
+    # Mbps up the side, test number along the bottom
+    for value in (0, highest / 2, highest):
+        y = bottom - value / highest * (bottom - top)
+        canvas.create_line(left, y, right, y, fill=LINE)
+        canvas.create_text(left - px(4), y, text=f"{value:.0f}", anchor="e", fill=MUTED, font=("Helvetica", 8))
+    canvas.create_text(px(2), px(2), text="Mbps", anchor="nw", fill=MUTED, font=("Helvetica", 8))
+    canvas.create_text(left, bottom + px(3), text="1", anchor="n", fill=MUTED, font=("Helvetica", 8))
+    canvas.create_text(right, bottom + px(3), text=str(len(tests)), anchor="n", fill=MUTED, font=("Helvetica", 8))
+    canvas.create_text((left + right) / 2, bottom + px(14), text="Test (oldest to newest)", anchor="n",
+                       fill=MUTED, font=("Helvetica", 8))
     step = (right - left) / max(len(tests) - 1, 1)
     for k, color in ((0, DOWN_COLOR), (1, UP_COLOR)):
         points = [(left + n * step, bottom - test[k] / highest * (bottom - top)) for n, test in enumerate(tests)]
