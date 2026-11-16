@@ -17,6 +17,11 @@ def main():
         print("[!] Needs root for raw packet sniffing. Start it with:  notafluke", file=sys.stderr)
         sys.exit(1)
 
+    # turn the 7 inch screen to its saved orientation before the window opens
+    if not args.windowed:
+        from .rotate import apply_orientation
+        apply_orientation()
+
     # import tkinter late so a missing screen gives a clear message
     # instead of the long "no $DISPLAY" traceback
     import tkinter as tk
@@ -27,6 +32,11 @@ def main():
         print("    Start it with:  notafluke   - it opens the small screen on the Pi, or a window", file=sys.stderr)
         print("    when run from a VM / desktop terminal (not plain SSH).", file=sys.stderr)
         sys.exit(1)
+
+    # a bigger screen than the 3.5 inch one makes everything bigger (rotate.py)
+    if not args.windowed:
+        from .rotate import set_scale, screen_size
+        set_scale(root, *screen_size(root))
 
     setup_logging()
     logger.info("fluke-gui started (test port %s, wifi %s)", INTERFACE, WIFI_INTERFACE)

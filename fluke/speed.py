@@ -133,6 +133,11 @@ def ping_burst(interface=INTERFACE, target=PING_TARGET, count=PING_COUNT, on_lin
 
 # never raises, if ping fails the results just stay Failed (shows N/A)
 def run_ping_test(results, interface=INTERFACE, on_line=None):
+    if get_ip(interface) == "":
+        logger.warning("no IP on %s - ping skipped", interface)
+        if on_line is not None:
+            on_line(f"No IP on {interface} - nothing to ping from")
+        return
     try:
         ping = ping_burst(interface, on_line=on_line)
         if ping is None:
@@ -148,11 +153,18 @@ def run_ping_test(results, interface=INTERFACE, on_line=None):
 # download + upload through one port, returns the speed curves (empty if it failed)
 def run_bandwidth_test(results, interface=INTERFACE, on_status=lambda text: None):
     with speed_test_lock:
+        # no IP on this port: the test would quietly go out the Wi-Fi instead, so don't run it
+        source_ip = get_ip(interface)
+        if source_ip == "":
+            logger.warning("no IP on %s - speed test skipped", interface)
+            return {"down": [], "up": []}
         try:
             # source_address forces the test through this port
             on_status("Connecting to closest server...")
-            st = speedtest.Speedtest(source_address=get_ip(interface))
-            st.get_best_server()
+            st = speedtest.Speedtest(source_address=source_ip)
+            best = st.get_best_server()
+            results["speed_server"] = f"{best.get('sponsor', '?')} ({best.get('name', '?')})"
+            on_status(f"Testing with {results['speed_server']}")
 
             sampler = SpeedSampler()
 

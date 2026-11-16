@@ -1,6 +1,7 @@
 # waits for one tap on the touchscreen, then exits. The notafluke launcher runs this after the
 # GUI closes, so tapping the terminal's "button" starts the GUI again (no keyboard needed)
 
+import select
 import struct
 import glob
 
@@ -10,21 +11,25 @@ EV_KEY = 1
 BTN_TOUCH = 330
 
 
-# the touchscreen's /dev/input/eventN, or "" if there isn't one
-def find_touchscreen():
+# the touchscreens' /dev/input/eventN (the small screen, or the 7 inch one, which has two)
+def find_touchscreens():
+    devices = []
     for path in glob.glob("/sys/class/input/event*/device/name"):
         with open(path) as f:
-            if "Touchscreen" in f.read():
-                return "/dev/input/" + path.split("/")[4]
-    return ""
+            name = f.read()
+        if "Touchscreen" in name or "MTouch" in name:
+            devices.append("/dev/input/" + path.split("/")[4])
+    return devices
 
 
 def main():
-    device = find_touchscreen()
-    if device == "":
+    devices = find_touchscreens()
+    if devices == []:
         raise SystemExit(1)
-    with open(device, "rb") as touch:
-        while True:
+    files = [open(device, "rb") for device in devices]
+    while True:
+        ready, _, _ = select.select(files, [], [])
+        for touch in ready:
             data = touch.read(EVENT.size)
             seconds, micros, kind, code, value = EVENT.unpack(data)
             # finger lifted off the screen = one tap

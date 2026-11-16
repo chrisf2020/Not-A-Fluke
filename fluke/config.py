@@ -3,7 +3,7 @@
 import os
 import logging
 
-VERSION = "0.7"
+VERSION = "1.0"
 
 
 # VMs name ports enp0s3 etc instead of eth0/wlan0, so fall back to the first real one.
@@ -37,8 +37,18 @@ SWITCH_DISCOVERY_TIMEOUT = 35
 # seconds it's a router / unmanaged switch (like a GL.iNet), so don't wait the full 35s
 SWITCH_QUICK_CHECK = 6
 
+# how much bigger than the 3.5" screen (480x320) everything is drawn, main.py sets it
+SCALE = 1.0
+
+
+# a size in pixels made for the small screen -> the same size on this screen
+def px(size):
+    return int(round(size * SCALE))
+
+
 LOG_DIR = "/var/log/fluke-gui"
 SCAN_LOG_PATH = os.path.join(LOG_DIR, "scans.jsonl")
+WIFI_LOG_PATH = os.path.join(LOG_DIR, "wifi_tests.jsonl")      # Wi-Fi speed tests, for Speed history
 EVENT_LOG_PATH = os.path.join(LOG_DIR, "events.log")
 HISTORY_PAGE_SIZE = 6
 HISTORY_PAGES = 5
@@ -65,34 +75,47 @@ def read_theme():
 
 THEME = read_theme()
 
-if THEME == "light":
-    BG = "#F2F2F2"
-    CARD_BG = "#FFFFFF"
-    BAR_BG = "#DCDCDC"
-    ACCENT = "#0077B6"
-    TEXT = "#111111"
-    MUTED = "#666666"
-    SOFT = "#333333"        # second-level text, like the IP and units
-    LINE = "#D0D0D0"        # graph grid lines
-    PRESSED = "#BBBBBB"     # button while it's held down
-    ON_ACCENT = "#FFFFFF"   # text on a highlighted button
-    GOOD = "#2E8B12"
-    OK = "#B8860B"
-    BAD = "#D32F2F"
-else:
-    BG = "#121212"
-    CARD_BG = "#1A1A1A"
-    BAR_BG = "#2B2B2B"
-    ACCENT = "#00E5FF"
-    TEXT = "#FFFFFF"
-    MUTED = "#8A8A8A"
-    SOFT = "#BBBBBB"
-    LINE = "#333333"
-    PRESSED = "#444444"
-    ON_ACCENT = "#000000"
-    # status colours, only used for good / so-so / bad
-    GOOD = "#76FF03"
-    OK = "#FFD700"
-    BAD = "#FF5252"
+# every colour for one theme, by name. The app can switch theme while it runs (see app.py)
+def theme_colors(theme):
+    if theme == "light":
+        return {
+            "THEME": "light",
+            "BG": "#F2F2F2",
+            "CARD_BG": "#FFFFFF",
+            "BAR_BG": "#DCDCDC",
+            "ACCENT": "#0077B6",
+            "TEXT": "#111111",
+            "MUTED": "#666666",
+            "SOFT": "#333333",        # second-level text, like the IP and units
+            "LINE": "#D0D0D0",        # graph grid lines
+            "PRESSED": "#BBBBBB",     # button while it's held down
+            "ON_ACCENT": "#FFFFFF",   # text on a highlighted button
+            "GOOD": "#2E8B12",
+            "OK": "#B8860B",
+            "BAD": "#D32F2F",
+            # one colour per access point on the channel map, darker ones so they show on white
+            "CHANNEL_COLORS": ["#E65100", "#0077B6", "#D32F2F", "#7B1FA2", "#2E7D32", "#C2185B", "#00838F", "#5D4037"],
+        }
+    return {
+        "THEME": "dark",
+        "BG": "#121212",
+        "CARD_BG": "#1A1A1A",
+        "BAR_BG": "#2B2B2B",
+        "ACCENT": "#00E5FF",
+        "TEXT": "#FFFFFF",
+        "MUTED": "#8A8A8A",
+        "SOFT": "#BBBBBB",
+        "LINE": "#333333",
+        "PRESSED": "#444444",
+        "ON_ACCENT": "#000000",
+        # status colours, only used for good / so-so / bad
+        "GOOD": "#76FF03",
+        "OK": "#FFD700",
+        "BAD": "#FF5252",
+        "CHANNEL_COLORS": ["#FFEB3B", "#00E5FF", "#FF5252", "#B15CFF", "#76FF03", "#FF9A2E", "#4DA3FF", "#FF80AB"],
+    }
+
+
+globals().update(theme_colors(THEME))   # BG, TEXT, GOOD ... for the saved theme
 
 logger = logging.getLogger("fluke-gui")

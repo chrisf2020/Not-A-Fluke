@@ -57,7 +57,7 @@ TEST_DOMAIN = "google.com"
 
 
 # only count questions (qr == 0), the answers are the same lookups. Skips the Pi's own background
-# lookups (updates, apps running on it like api.anthropic.com) - only our test lookup and lookups
+# lookups (updates, apps running on it) - only our test lookup and lookups
 # from other devices on the port count
 def count_dns_question(results, packet, own_ip=""):
     if packet.haslayer(DNS) and packet.haslayer(DNSQR) and packet[DNS].qr == 0:
@@ -70,13 +70,14 @@ def count_dns_question(results, packet, own_ip=""):
 
 
 # start the sniffer, do one lookup, then keep sniffing 3s. fills the dns_* fields
-def run_dns_test(results, interface=INTERFACE):
+# on_line(text) gets a line for the screen as each part happens
+def run_dns_test(results, interface=INTERFACE, on_line=lambda text: None):
     sniffer = None
     sniffer_ok = False
+    from .speed import get_ip
+    own_ip = get_ip(interface)
     try:
         sniffer_ready = threading.Event()
-        from .speed import get_ip
-        own_ip = get_ip(interface)
         sniffer = AsyncSniffer(
             iface=interface, filter="port 53", prn=lambda packet: count_dns_question(results, packet, own_ip),
             store=False, started_callback=sniffer_ready.set
@@ -91,17 +92,32 @@ def run_dns_test(results, interface=INTERFACE):
         logger.warning("DNS sniffer is not listening - doing the active lookup only")
 
     try:
+        # no IP on the cable = the network gave it nothing (no DHCP), so there's nothing to ask
+        if own_ip == "":
+            results["dns_server"] = "--"
+            results["dns_time"] = "No IP on the cable (no DHCP)"
+            on_line("No IP address on the cable (no DHCP) - can't ask DNS")
+            time.sleep(2)
+            return
+        on_line(f"Pi's address: {own_ip}")
         servers = get_dns_servers(interface)
         if len(servers) == 0:
             servers = ["1.1.1.1"]   # none from the network, use a public one
+            on_line("The network gave no DNS server, using 1.1.1.1")
+        else:
+            on_line("DNS from the network: " + ", ".join(servers))
         server = servers[0]
 
+        on_line(f"Asking {server} for {TEST_DOMAIN}...")
         worked, answer = dns_lookup(server, TEST_DOMAIN, interface)
         results["dns_server"] = server
         results["dns_time"] = answer
+        on_line(f"Answered in {answer}" if worked else f"No good answer: {answer}")
 
         if sniffer_ok:
+            on_line("Listening for other DNS lookups on the port...")
             time.sleep(3)           # catch other DNS traffic
+            on_line(f"Lookups seen: {results['dns_queries']}")
         else:
             # no sniffer, so just count our own lookup
             results["dns_queries"] += 1

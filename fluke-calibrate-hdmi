@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+# fluke-calibrate-hdmi: calibrates the 7 inch HDMI touchscreen. Run it with:  notafluke calibrate
+# It shows a cross in each corner, you tap each one, and it works out how far off the touch is.
+# The result is saved in /etc/pi-fluke-touch-hdmi.json and used the next time the GUI starts.
+
+import json
+import os
+import subprocess
+import tkinter as tk
+
+import evdev
+import numpy as np
+from evdev import ecodes
+
+SAVE_FILE = "/etc/pi-fluke-touch-hdmi.json"
+MARGIN = 60   # how far the crosses are from the edges (pixels)
+
+
+# the touch screen (the one that has X and Y positions)
+def find_touch():
+    for path in evdev.list_devices():
+        device = evdev.InputDevice(path)
+        if "MTouch" in device.name and ecodes.EV_ABS in device.capabilities():
+            return device
+    raise SystemExit("touchscreen not found")
+
+
+touch = find_touch()
+x_info = touch.absinfo(ecodes.ABS_X)
+y_info = touch.absinfo(ecodes.ABS_Y)
+
+root = tk.Tk()
+root.attributes("-fullscreen", True)
+root.configure(bg="black")
+canvas = tk.Canvas(root, bg="black", highlightthickness=0)
+canvas.pack(fill=tk.BOTH, expand=True)
+root.update()
+width, height = root.winfo_width(), root.winfo_height()
+
+targets = [(MARGIN, MARGIN), (width - MARGIN, MARGIN), (MARGIN, height - MARGIN), (width - MARGIN, height - MARGIN)]
+taps = []          # raw positions (0 to 1) of each tap
+state = {"x": None, "y": None, "down": False}
+
+
+def draw(number):
+    canvas.delete("all")
+    tx, ty = targets[number]
+    canvas.create_text(width // 2, height // 2, fill="white", font=("DejaVu Sans", 24, "bold"),
+                       text=f"Tap the middle of the cross\n({number + 1} of 4)", justify="center")
+    canvas.create_line(tx - 25, ty, tx + 25, ty, fill="red", width=4)
+    canvas.create_line(tx, ty - 25, tx, ty + 25, fill="red", width=4)
+
+
+# read touch events, called every 20 ms
+def poll():
+    try:
+        for event in touch.read():
+            if event.type == ecodes.EV_ABS and event.code == ecodes.ABS_X:
+                state["x"] = (event.value - x_info.min) / (x_info.max - x_info.min)
+            elif event.type == ecodes.EV_ABS and event.code == ecodes.ABS_Y:
+                state["y"] = (event.value - y_info.min) / (y_info.max - y_info.min)
+            elif event.type == ecodes.EV_KEY and event.code == ecodes.BTN_TOUCH:
+                if event.value == 1:
+                    state["down"] = True
+                elif state["down"] and state["x"] is not None:   # finger lifted = one tap
+                    state["down"] = False
+                    taps.append((state["x"], state["y"]))
+                    if len(taps) == 4:
+                        finish()
+                        return
+                    draw(len(taps))
+    except BlockingIOError:
+        pass
+    root.after(20, poll)
+
+
+# works out the touch matrix: screen position = a * raw + c  (for X and for Y)
+def finish():
+    raw = np.array(taps)
+    want = np.array([(tx / width, ty / height) for tx, ty in targets])
+    a, c = np.polyfit(raw[:, 0], want[:, 0], 1)
+    e, f = np.polyfit(raw[:, 1], want[:, 1], 1)
+    matrix = [round(v, 5) for v in (a, 0, c, 0, e, f, 0, 0, 1)]
+    with open(SAVE_FILE, "w") as out:
+        json.dump({"matrix": matrix}, out)
+    print("Saved", matrix)
+    canvas.delete("all")
+    canvas.create_text(width // 2, height // 2, fill="white", font=("DejaVu Sans", 24, "bold"),
+                       text="Calibration saved", justify="center")
+    root.after(1500, root.destroy)
+
+
+# start from a flat matrix so the old calibration doesn't matter, we read the raw numbers
+subprocess.run(["xinput", "set-prop", "pointer:TSTP MTouch", "Coordinate Transformation Matrix",
+                "1", "0", "0", "0", "1", "0", "0", "0", "1"], stderr=subprocess.DEVNULL)
+os.set_blocking(touch.fd, False)
+draw(0)
+poll()
+root.mainloop()

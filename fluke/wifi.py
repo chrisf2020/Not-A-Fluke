@@ -9,8 +9,8 @@ import subprocess
 import tkinter as tk
 from datetime import datetime
 
-from .config import WIFI_INTERFACE, BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger
-from .graph import MetricsGraph, ChannelGraph, band_aps
+from .config import WIFI_INTERFACE, BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger, px
+from .graph import MetricsGraph, ChannelGraph, band_aps, ap_color
 from .speed import get_ip, route_interface, run_ping_test, run_bandwidth_test, speed_test_lock
 
 
@@ -155,6 +155,16 @@ def scan_wifi():
     return access_points
 
 
+# the last scan the radio already has, instant (no new scan). Used for the PDF
+def cached_wifi():
+    if not has_wifi():
+        return []
+    result = subprocess.run(["iw", "dev", WIFI_INTERFACE, "scan", "dump"], capture_output=True, text=True, timeout=10)
+    access_points = parse_iw_scan(result.stdout)
+    access_points.sort(key=lambda ap: ap["signal"], reverse=True)
+    return access_points
+
+
 # which network the Pi's wifi is on and how strong
 # returns {"ssid": ..., "signal": ...} or None if not connected
 def parse_iw_link(text):
@@ -256,11 +266,11 @@ class WifiScreens:
         self.make_switcher(self.wifi_frame, self.wifi_tabs(), "Networks")
 
         top = tk.Frame(self.wifi_frame, bg=BG)
-        top.pack(fill=tk.X, padx=8)
+        top.pack(fill=tk.X, padx=px(8))
         self.wifi_status_lbl = tk.Label(top, text="", font=("Helvetica", 10), bg=BG, fg=MUTED)
         self.wifi_status_lbl.pack(side=tk.LEFT)
         self.wifi_scan_button = self.make_button(top, "↻ Scan", self.start_wifi_scan, size=11)
-        self.wifi_scan_button.pack(side=tk.RIGHT, pady=2)
+        self.wifi_scan_button.pack(side=tk.RIGHT, pady=px(2))
 
         self.wifi_canvas, self.wifi_rows = self.make_scroll_area(self.wifi_frame)
 
@@ -272,21 +282,29 @@ class WifiScreens:
         self.make_switcher(self.channels_frame, self.wifi_tabs(), "Channels")
 
         top = tk.Frame(self.channels_frame, bg=BG)
-        top.pack(fill=tk.X, padx=8)
+        top.pack(fill=tk.X, padx=px(8))
         self.channels_status_lbl = tk.Label(top, text="", font=("Helvetica", 10), bg=BG, fg=MUTED)
         self.channels_status_lbl.pack(side=tk.LEFT)
         self.channels_scan_button = self.make_button(top, "↻ Scan", self.start_wifi_scan, size=11)
-        self.channels_scan_button.pack(side=tk.RIGHT, pady=2)
+        self.channels_scan_button.pack(side=tk.RIGHT, pady=px(2))
         self.channels_band_button = self.make_button(top, "2.4 GHz", self.toggle_channel_band, size=11)
-        self.channels_band_button.pack(side=tk.RIGHT, padx=4, pady=2)
+        self.channels_band_button.pack(side=tk.RIGHT, padx=px(4), pady=px(2))
+        # zoom in / out on the channels, drag sideways on the chart to move along
+        self.make_button(top, "+", lambda: self.channel_graph.zoom_in(), size=11).pack(side=tk.RIGHT, padx=px(2))
+        self.make_button(top, "−", lambda: self.channel_graph.zoom_out(), size=11).pack(side=tk.RIGHT, padx=px(2))
 
-        self.channel_graph = ChannelGraph(self.channels_frame)
-        self.channel_graph.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(2, 4))
+        # names and colours under the chart, tap one (or its arch) for the details
+        self.channel_legend = tk.Frame(self.channels_frame, bg=BG)
+        self.channel_legend.pack(side=tk.BOTTOM, fill=tk.X, padx=px(8), pady=(0, px(4)))
+
+        self.channel_graph = ChannelGraph(self.channels_frame, on_tap=self.show_ap_from_channels)
+        self.channel_graph.canvas.pack(fill=tk.BOTH, expand=True, padx=px(8), pady=(px(2), px(4)))
 
     # shown when a network is tapped
     def build_ap_ui(self):
         self.ap_frame = tk.Frame(self.container, bg=BG)
-        self.make_header(self.ap_frame, "Network info", back=self.show_wifi_frame)
+        self.ap_back = self.show_wifi_frame      # Back goes to the list or the channel map
+        self.make_header(self.ap_frame, "Network info", back=lambda: self.ap_back())
         self.ap_canvas, ap_inner = self.make_scroll_area(self.ap_frame)
         self.ap_card = tk.Frame(ap_inner, bg=BG)
         self.ap_card.pack(fill=tk.X)
@@ -299,22 +317,23 @@ class WifiScreens:
         self.make_switcher(self.wifi_speed_frame, self.wifi_tabs(), "Speed")
 
         top = tk.Frame(self.wifi_speed_frame, bg=BG)
-        top.pack(fill=tk.X, padx=8)
+        top.pack(fill=tk.X, padx=px(8))
         self.wifi_speed_status_lbl = tk.Label(top, text="", font=("Helvetica", 10), bg=BG, fg=MUTED,
-                                              wraplength=280, justify=tk.LEFT)
+                                              wraplength=px(280), justify=tk.LEFT)
         self.wifi_speed_status_lbl.pack(side=tk.LEFT)
         self.wifi_speed_button = self.make_button(top, "▶ Run", self.start_wifi_speed_test, size=11)
-        self.wifi_speed_button.pack(side=tk.RIGHT, pady=2)
+        self.wifi_speed_button.pack(side=tk.RIGHT, pady=px(2))
 
         self.wifi_speed_canvas, inner = self.make_scroll_area(self.wifi_speed_frame)
         card = self.make_card(inner, "Wi-Fi speed")
         self.wifi_graph = MetricsGraph(card, WIFI_INTERFACE)
-        self.wifi_graph.canvas.pack(fill=tk.X, padx=4, pady=4)
+        self.wifi_graph.canvas.pack(fill=tk.X, padx=px(4), pady=px(4))
 
     def open_wifi(self):
         if self.current_view in ("wifi_speed", "channels"):
             return
         self.show_wifi_frame()
+        self.wifi_canvas.yview_moveto(0)
         self.start_wifi_scan()
 
     def show_wifi_frame(self):
@@ -332,6 +351,22 @@ class WifiScreens:
         self.channels_band_button.config(text=f"{self.channel_band} GHz")
         self.update_channel_status()
         self.channel_graph.show(self.wifi_aps, self.channel_band)
+        self.update_channel_legend()
+
+    # one coloured name per network on this band, same colours as the chart
+    def update_channel_legend(self):
+        for child in self.channel_legend.winfo_children():
+            child.destroy()
+        columns = 2 if self.portrait else 3
+        shown = band_aps(self.wifi_aps, self.channel_band)[:14 if self.portrait else 9]
+        for rank, ap in enumerate(shown):
+            name = "hidden" if ap["ssid"] == "<hidden>" else ap["ssid"]
+            label = tk.Label(self.channel_legend, text=f"● {name}", font=("Helvetica", 10, "bold"),
+                             bg=BG, fg=ap_color(rank), anchor="w")
+            label.grid(row=rank // columns, column=rank % columns, sticky="ew", padx=px(4))
+            label.bind("<ButtonRelease-1>", lambda event, a=ap, r=rank: self.show_ap_from_channels(a, ap_color(r)))
+        for column in range(columns):
+            self.channel_legend.columnconfigure(column, weight=1, uniform="legend")
 
     # "4 on 2.4 GHz at 12:24 PM" under the Channels tab
     def update_channel_status(self):
@@ -364,19 +399,19 @@ class WifiScreens:
         self.root.after(0, self.show_wifi_results, access_points)
 
     # each row: signal bars, name, band and locked/open. tap for more
-    def show_wifi_results(self, access_points):
+    def show_wifi_results(self, access_points, stamp=None):
         self.wifi_scanning = False
         self.wifi_scan_button.config(text="↻ Scan")
         self.channels_scan_button.config(text="↻ Scan")
 
         for child in self.wifi_rows.winfo_children():
             child.destroy()
-        self.wifi_canvas.yview_moveto(0)
 
-        stamp = datetime.now().strftime("%I:%M %p")
+        stamp = stamp or datetime.now().strftime("%I:%M %p")
         self.wifi_aps = access_points
         self.wifi_scan_stamp = stamp
         self.channel_graph.show(access_points, self.channel_band)
+        self.update_channel_legend()
         self.update_channel_status()
         if len(access_points) == 0:
             self.channels_status_lbl.config(text="No networks found")
@@ -384,12 +419,12 @@ class WifiScreens:
 
         if len(access_points) == 0:
             tk.Label(self.wifi_rows, text="No networks found", font=("Helvetica", 14),
-                     bg=BG, fg=MUTED).pack(pady=30)
+                     bg=BG, fg=MUTED).pack(pady=px(30))
             return
 
         for ap in access_points:
             row = tk.Frame(self.wifi_rows, bg=CARD_BG)
-            row.pack(fill=tk.X, padx=8, pady=2)
+            row.pack(fill=tk.X, padx=px(8), pady=px(2))
             name = ap["ssid"] + ("  (Pi)" if ap["connected"] else "")
             lock = "open" if ap["security"] == "OPEN" else "locked"
             parts = [
@@ -398,8 +433,8 @@ class WifiScreens:
                 tk.Label(row, text=name, font=("Helvetica", 12, "bold"), bg=CARD_BG, fg=TEXT, anchor="w"),
                 tk.Label(row, text=f"{band_name(ap['freq'])}  {lock}", font=("Helvetica", 10), bg=CARD_BG, fg=MUTED),
             ]
-            parts[0].pack(side=tk.LEFT, padx=(8, 4), pady=5)
-            parts[2].pack(side=tk.RIGHT, padx=8)
+            parts[0].pack(side=tk.LEFT, padx=(px(8), px(4)), pady=px(5))
+            parts[2].pack(side=tk.RIGHT, padx=px(8))
             parts[1].pack(side=tk.LEFT, fill=tk.X, expand=True)
             for widget in [row] + parts:
                 widget.bind("<ButtonRelease-1>", lambda event, a=ap: self.show_ap_info(a))
@@ -409,12 +444,21 @@ class WifiScreens:
     def show_ap_info(self, ap):
         if self.drag_moved:
             return
+        self.ap_back = self.show_wifi_frame
+        self.fill_ap_info(ap)
+
+    # tapped on the channel map, Back goes back to the map. The name keeps the chart's colour
+    def show_ap_from_channels(self, ap, color=ACCENT):
+        self.ap_back = lambda: self.show_frame(self.channels_frame, "channels")
+        self.fill_ap_info(ap, color)
+
+    def fill_ap_info(self, ap, color=ACCENT):
         for child in self.ap_card.winfo_children():
             child.destroy()
-        card = self.make_card(self.ap_card, ap["ssid"])
+        card = self.make_card(self.ap_card, ap["ssid"], color)
         for label, value in ap_detail_rows(ap)[1:]:
             self.make_row(card, label, value)
-        tk.Frame(card, bg=CARD_BG, height=6).pack()
+        tk.Frame(card, bg=CARD_BG, height=px(6)).pack()
         self.show_frame(self.ap_frame, "ap")
         self.ap_canvas.yview_moveto(0)
 
@@ -463,12 +507,18 @@ class WifiScreens:
             run_ping_test(results, WIFI_INTERFACE)
 
             if speed_test_lock.locked():
-                self.set_wifi_speed_status("Waiting for the cable test to finish...")
+                self.set_wifi_speed_status("Waiting for the LAN test to finish...")
             curves = run_bandwidth_test(
                 results, WIFI_INTERFACE,
                 on_status=lambda text: self.set_wifi_speed_status(f"{name}: {text}")
             )
 
+            # kept for History > Speed history
+            if results["speed_down"] != "Failed":
+                from .history import save_scan_record, now_stamp
+                from .config import WIFI_LOG_PATH
+                save_scan_record({"ssid": name, "started_at": now_stamp(), "speed_down": results["speed_down"],
+                                  "speed_up": results["speed_up"]}, WIFI_LOG_PATH)
             stamp = datetime.now().strftime("%I:%M %p")
             signal = f", {SIGNAL_WORDS[signal_level(link['signal'])].lower()} signal" if link and link["signal"] is not None else ""
             self.set_wifi_speed_status(f"{name}{signal}, tested {stamp}", MUTED)
@@ -478,6 +528,7 @@ class WifiScreens:
         self.root.after(0, self.finish_wifi_speed_test, results, curves)
 
     def finish_wifi_speed_test(self, results, curves):
+        self.wifi_speed_last = (results, curves)     # kept when the screen turns
         self.wifi_speed_running = False
         self.wifi_speed_button.config(text="▶ Run")
         self.wifi_graph.show(results, curves)

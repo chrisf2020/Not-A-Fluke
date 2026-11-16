@@ -53,7 +53,7 @@ esac
 
 # anything else isn't a command, show the list instead of starting the GUI
 case "$1" in
-  ""|-f|boot|stop|calibrate|install|autostart|blank|view|window) ;;
+  ""|-f|boot|gui|stop|calibrate|install|autostart|blank|view|window) ;;
   *) echo "notafluke: unknown command '$1'"; sed -n '/^#   /s/^# //p' "$SELF"; exit 1 ;;
 esac
 
@@ -68,16 +68,19 @@ fi
 
 # at boot the screen driver can show up a few seconds late, so wait for it
 if [ "$1" = "boot" ]; then
-  for i in $(seq 30); do grep -qs '^fb_' /sys/class/graphics/fb*/name && break; sleep 1; done
+  for i in $(seq 30); do grep -qs '^fb_' /sys/class/graphics/fb*/name && break; grep -qs '^connected' /sys/class/drm/card*-HDMI-A-*/status && break; sleep 1; done
 fi
 
 # find the small screen (framebuffer name starts with fb_)
 FB=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5)
+# a monitor / 7 inch screen on HDMI wins over the small screen
+HDMI=$(grep -l '^connected' /sys/class/drm/card*-HDMI-A-*/status 2>/dev/null | head -1)
+[ -n "$HDMI" ] && FB=
 
 # packages come from apt, newer Pi OS / Debian block sudo pip install
 PACKAGES="python3 python3-tk python3-scapy speedtest-cli lldpd iw tcpdump network-manager iputils-ping iproute2 x11-xserver-utils python3-pil python3-qrcode"
 # extra packages for the small screen
-[ -n "$FB" ] && PACKAGES="$PACKAGES xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit matchbox-window-manager fbset x11vnc"
+{ [ -n "$FB" ] || [ -n "$HDMI" ]; } && PACKAGES="$PACKAGES xserver-xorg-input-libinput xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit matchbox-window-manager fbset x11vnc"
 
 # true if all packages are installed, lldpd is running and the command exists
 has_everything() {
@@ -96,7 +99,7 @@ install_all() {
     ln -sf "$DIR/fluke-calibrate" /usr/local/bin/fluke-calibrate
   fi
   # start on boot and go black on shutdown, only on the Pi (a VM has no small screen)
-  if [ -n "$FB" ] && [ "$1" = "relink" ]; then autostart on; blank_on_shutdown; fi
+  if { [ -n "$FB" ] || [ -n "$HDMI" ]; } && [ "$1" = "relink" ]; then autostart on; blank_on_shutdown; fi
   return 0
 }
 
@@ -150,7 +153,9 @@ UNIT
     echo "On: it'll start by itself the next time the Pi boots (sudo reboot to see it now)."
 }
 
-stop() { pkill -f "fluke/tap.py" 2>/dev/null; pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI_MATCH" 2>/dev/null; }
+# the copy being closed sees this file and leaves the screen alone (no tap-to-start).
+# The new copy deletes it once its screen is up
+stop() { touch /tmp/notafluke-replaced; pkill -f "fluke/tap.py" 2>/dev/null; pkill -f "Xorg $DISPLAY_NUM -config /run/notafluke" 2>/dev/null; pkill -f "$GUI_MATCH" 2>/dev/null; }
 
 # after the GUI closes, clear the small screen and move tty1-6 back onto it
 # the text console and the GUI share the one small screen. 0 = console stops drawing on it
@@ -161,8 +166,10 @@ console_bind() {
 
 closed_screen() {
   TFT_NUM=$(grep -l '^fb_' /sys/class/graphics/fb*/name 2>/dev/null | head -1 | cut -d/ -f5 | tr -d fb)
-  [ -n "$TFT_NUM" ] || return
   console_bind 1
+  if [ -z "$TFT_NUM" ] || [ -n "$HDMI" ]; then
+    chvt 2 2>/dev/null; sleep 0.3; chvt 1 2>/dev/null; return   # HDMI screen: just bring the console back
+  fi
   dd if=/dev/zero of=/dev/fb$TFT_NUM bs=64k status=none 2>/dev/null
   # put tty1-6 on the small screen (matters when HDMI is fb0 and the small screen is fb1)
   for tty in 1 2 3 4 5 6; do con2fbmap $tty $TFT_NUM; done
@@ -174,8 +181,23 @@ closed_screen() {
   TERM=linux setterm --blank 0 --powerdown 0 </dev/tty1 >/dev/tty1 2>/dev/null
 }
 
+# the 7 inch screen's start screen: logo, Wi-Fi and cable status (kept up to date), and a tap
+# starts the GUI
+start_screen() {
+  TERM=linux setterm --cursor off </dev/tty1 >/dev/tty1 2>/dev/null
+  printf '\033[2J' > /dev/tty1
+  python3 "$DIR/fluke/splash.py" --live &
+  SPLASH=$!
+  python3 "$DIR/fluke/tap.py"
+  TAPPED=$?
+  kill $SPLASH 2>/dev/null
+  [ $TAPPED = 0 ] && exec "$SELF" gui
+}
+
 case "$1" in
-  stop) stop; sleep 1; closed_screen; echo "Not-A-Fluke stopped."; exit 0 ;;
+  stop) stop; sleep 1; closed_screen
+        TERM=linux setterm --cursor on </dev/tty1 >/dev/tty1 2>/dev/null
+        echo "Not-A-Fluke stopped."; exit 0 ;;
   # from the shutdown service: stop the console drawing on the small screen and paint it black,
   # so it's black instead of white once the Pi is off
   blank)
@@ -183,12 +205,16 @@ case "$1" in
     [ -n "$FB" ] && dd if=/dev/zero of=/dev/$FB bs=64k status=none 2>/dev/null
     exit 0 ;;
   calibrate)
-    # move the terminal off the screen, calibrate, then put it back
-    stop; sleep 1
-    for tty in 1 2 3 4 5 6; do con2fbmap $tty 0; done
-    "$DIR/fluke-calibrate"
-    closed_screen
-    exit 0 ;;
+    if [ -n "$HDMI" ]; then
+      CALIBRATING=1; set -- -f   # 7 inch screen: run the calibration instead of the GUI, below
+    else
+      # move the terminal off the screen, calibrate, then put it back
+      stop; sleep 1
+      for tty in 1 2 3 4 5 6; do con2fbmap $tty 0; done
+      "$DIR/fluke-calibrate"
+      closed_screen
+      exit 0
+    fi ;;
   install) install_all relink || exit 1; echo "Installed. Start it with:  notafluke"; exit 0 ;;
   autostart) autostart "$2"; exit 0 ;;
   # share the small screen over VNC. Only on localhost, so you reach it through an SSH tunnel:
@@ -200,7 +226,11 @@ case "$1" in
     pgrep -f "$GUI_MATCH" >/dev/null || { "$SELF"; sleep 3; }
     echo "Sharing the small screen on localhost:5901. Open your VNC viewer now. Ctrl-C to stop."
     exec x11vnc -display "$DISPLAY_NUM" -localhost -rfbport 5901 -shared -forever -nopw -quiet ;;
-  boot) BOOTING=1; set -- -f ;;   # from the boot service: run in the foreground
+  # from the boot service. 7 inch screen: the start screen first, the GUI when it's tapped
+  boot)
+    if [ -n "$HDMI" ]; then closed_screen; start_screen; exit 0; fi
+    BOOTING=1; set -- -f ;;
+  gui) BOOTING=1; set -- -f ;;    # the GUI in the foreground (after the start screen)
 esac
 
 # install anything missing first
@@ -219,7 +249,7 @@ sleep 0.5
 
 # no small screen (VM / desktop), or "window": open a window on $DISPLAY instead.
 # over "ssh -X" that window shows up on your own computer
-if [ -z "$FB" ] || [ "$1" = "window" ]; then
+if { [ -z "$FB" ] && [ -z "$HDMI" ]; } || [ "$1" = "window" ]; then
   if [ -z "$DISPLAY" ]; then
     echo "notafluke: no small TFT screen and no desktop to open a window on." >&2
     echo "  On a VM: run it from a terminal on the VM's desktop (not plain SSH)." >&2
@@ -239,6 +269,24 @@ fi
 # X config that only draws on the TFT, not HDMI
 CONF_DIR=/run/notafluke
 mkdir -p "$CONF_DIR"
+if [ -n "$HDMI" ]; then
+  # HDMI screen: the normal video driver uses the screen's own size, touch sets itself up
+  cat > "$CONF_DIR/xorg.conf" <<EOF
+Section "ServerFlags"
+    Option "BlankTime"   "0"
+    Option "StandbyTime" "0"
+    Option "SuspendTime" "0"
+    Option "OffTime"     "0"
+EndSection
+Section "Device"
+    Identifier "HDMI"
+    Driver     "modesetting"
+    # draw in software so turning the screen sideways fills all of it
+    Option     "AccelMethod" "none"
+    Option     "ShadowFB" "true"
+EndSection
+EOF
+else
 cat > "$CONF_DIR/xorg.conf" <<EOF
 Section "ServerFlags"
     Option "AutoAddGPU" "false"
@@ -270,17 +318,35 @@ Section "InputClass"
 $CAL
 EndSection
 EOF
+fi
 
-# X session: no blanking, no cursor, then the GUI
+# 7 inch screen: use the saved touch calibration, if there is one
+if [ -n "$HDMI" ] && [ -s /etc/pi-fluke-touch-hdmi.json ]; then
+  MATRIX=$(python3 -c "import json; print(' '.join(str(v) for v in json.load(open('/etc/pi-fluke-touch-hdmi.json'))['matrix']))")
+  cat >> "$CONF_DIR/xorg.conf" <<EOF
+Section "InputClass"
+    Identifier   "notafluke hdmi touch"
+    MatchProduct "TSTP MTouch"
+    MatchIsTouchscreen "on"
+    Driver       "libinput"
+    Option       "CalibrationMatrix" "$MATRIX"
+EndSection
+EOF
+fi
+
+# X session: no blanking, no cursor, then the GUI (or the calibration)
+SESSION_CMD="python3 -m fluke"
+[ -n "$CALIBRATING" ] && SESSION_CMD="python3 $DIR/fluke-calibrate-hdmi"
 cat > "$CONF_DIR/session" <<EOF
 #!/bin/sh
+rm -f /tmp/notafluke-replaced
 xset s off -dpms 2>/dev/null
 # at boot the console can still write onto the screen for a few seconds after the GUI is up,
 # and X doesn't know, so bits (like the arrows) stay missing until tapped. Repaint everything a few times
 (sleep 3; xrefresh; sleep 5; xrefresh; sleep 10; xrefresh) 2>/dev/null &
 # Tiny window manager so the GUI's fullscreen fills the whole small screen.
 matchbox-window-manager -use_titlebar no -use_cursor no &
-cd "$DIR" && exec python3 -m fluke
+cd "$DIR" && exec $SESSION_CMD
 EOF
 chmod +x "$CONF_DIR/session"
 
@@ -291,21 +357,36 @@ CMD=(xinit "$CONF_DIR/session" -- /usr/bin/Xorg "$DISPLAY_NUM" -config "$CONF_DI
 
 # a "button" on the bottom line of the terminal. Tapping the screen starts the GUI again
 wait_for_tap() {
-  # notafluke was started again and closed this copy - the new one has the screen
-  sleep 3
-  pgrep -f "Xorg $DISPLAY_NUM" >/dev/null && return
+  # notafluke was started again (or stopped) and closed this copy - leave the screen alone
+  if [ -e /tmp/notafluke-replaced ]; then return; fi
+  # ✕ -> Terminal: the command line, with a tap-to-start bar on the bottom line
+  if [ "$(cat /tmp/notafluke-exit 2>/dev/null)" = "terminal" ]; then
+    rm -f /tmp/notafluke-exit
+    TERM=linux setterm --cursor on </dev/tty1 >/dev/tty1 2>/dev/null
+    printf '\033[999;1H\033[7m   TAP HERE TO START NOT-A-FLUKE   \033[0m' > /dev/tty1
+    python3 "$DIR/fluke/tap.py" || return
+    TERM=linux setterm --cursor off </dev/tty1 >/dev/tty1 2>/dev/null
+    exec "$SELF" gui
+  fi
+  rm -f /tmp/notafluke-exit
+  # 7 inch screen: the start screen. The small one: a bar on the bottom line
+  if [ -n "$HDMI" ]; then start_screen; return; fi
   printf '\033[99;1H\033[7m   TAP THE SCREEN TO START NOT-A-FLUKE   \033[0m' > /dev/tty1
-  python3 "$DIR/fluke/tap.py" && exec "$SELF" boot
+  python3 "$DIR/fluke/tap.py" || return
+  exec "$SELF" gui
 }
 
 # run the GUI, then give the screen back to the terminal
 run() { console_bind 0; "${CMD[@]}"; closed_screen; wait_for_tap; }
 
+if [ -n "$CALIBRATING" ]; then
+  console_bind 0; "${CMD[@]}"; exec "$SELF"   # calibrate, then start the GUI again
+fi
 if [ "$1" = "-f" ]; then
   run; exit
 fi
-export -f run closed_screen console_bind wait_for_tap
-export DIR SELF DISPLAY_NUM
+export -f run closed_screen console_bind wait_for_tap start_screen
+export DIR SELF DISPLAY_NUM HDMI
 export CMD_STR="$(printf '%q ' "${CMD[@]}")"
 setsid nohup bash -c 'eval "CMD=($CMD_STR)"; run' >"$LOG" 2>&1 < /dev/null &
 echo "Not-A-Fluke is running on the small screen.  Stop: notafluke stop   Log: notafluke log"

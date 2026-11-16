@@ -207,6 +207,14 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(len(records), config.MAX_SCAN_RECORDS)
             self.assertEqual(records[0]["n"], config.MAX_SCAN_RECORDS + 4)   # newest first
 
+    def test_speed_groups(self):
+        lan = [{"switch_name": "SW1", "speed_down": "20.0 Mbps", "speed_up": "5.0 Mbps"},
+               {"switch_name": "SW1", "speed_down": "Failed"},
+               {"switch_name": "SW1", "speed_down": "10.0 Mbps", "speed_up": "2.0 Mbps"}]
+        wifi = [{"ssid": "Home", "speed_down": "50.0 Mbps", "speed_up": "9.0 Mbps"}]
+        self.assertEqual(history.speed_groups(lan, wifi),
+                         [("LAN  SW1", [(10.0, 2.0), (20.0, 5.0)]), ("Wi-Fi  Home", [(50.0, 9.0)])])
+
     def test_summary(self):
         record = {"complete": False, "started_at": "2026-09-30T14:05:12", "switch_name": "SWITCH-01",
                   "switch_port": "GigabitEthernet1/0/5", "speed_down": "93.4 Mbps"}
@@ -293,7 +301,7 @@ class DnsTests(unittest.TestCase):
     def test_pi_background_lookups_are_ignored(self):
         from fluke import dns
         results = {"dns_queries": 0, "dns_last_domain": "None"}
-        dns.count_dns_question(results, self.packet("192.168.8.159", "api.anthropic.com"), "192.168.8.159")
+        dns.count_dns_question(results, self.packet("192.168.8.159", "updates.example.com"), "192.168.8.159")
         dns.count_dns_question(results, self.packet("192.168.8.159", "google.com"), "192.168.8.159")
         self.assertEqual(results, {"dns_queries": 1, "dns_last_domain": "google.com"})
 

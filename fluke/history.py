@@ -10,8 +10,8 @@ import tkinter as tk
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
-from .config import (LOG_DIR, SCAN_LOG_PATH, EVENT_LOG_PATH, MAX_SCAN_RECORDS, HISTORY_PAGE_SIZE,
-                     BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, logger)
+from .config import (LOG_DIR, SCAN_LOG_PATH, WIFI_LOG_PATH, EVENT_LOG_PATH, MAX_SCAN_RECORDS, HISTORY_PAGE_SIZE,
+                     BG, CARD_BG, BAR_BG, ACCENT, TEXT, MUTED, GOOD, OK, BAD, logger, px)
 
 
 # --- LOGGING + HISTORY HELPERS ---
@@ -162,46 +162,115 @@ def format_record_detail(record):
     return "\n".join(lines)
 
 
+# the sections of a scan's details: (title, [(label, key in the record), ...]). Used by the
+# Scan detail screen and the PDF
+DETAIL_GROUPS = [
+    ("Switch", [("Switch", "switch_name"), ("Port", "switch_port"), ("VLAN", "switch_vlan"),
+                ("Voice VLAN", "switch_voice"), ("PoE", "switch_poe"), ("Link", "link_speed"),
+                ("Switch IP", "switch_ip"), ("Found via", "switch_proto")]),
+    ("DNS", [("Server", "dns_server"), ("Answer", "dns_time")]),
+    ("Speed", [("Download", "speed_down"), ("Upload", "speed_up"), ("Ping", "ping_latency"),
+               ("Jitter", "ping_jitter"), ("Packet loss", "ping_loss"), ("Rating", "speed_rating"),
+               ("Server", "speed_server")]),
+]
+
+
+# speed tests grouped by where they ran: each switch (LAN) and each Wi-Fi network.
+# returns [(title, [(download, upload), ...] oldest first), ...]. Failed tests are left out
+def speed_groups(lan_records, wifi_records):
+    from .speed import read_number
+    groups = {}
+    for kind, records, key in (("LAN", lan_records, "switch_name"), ("Wi-Fi", wifi_records, "ssid")):
+        for record in reversed(records):            # the logs load newest first
+            down = read_number(record.get("speed_down"))
+            if down is not None:
+                title = f"{kind}  {record.get(key, '--')}"
+                groups.setdefault(title, []).append((down, read_number(record.get("speed_up")) or 0))
+    return list(groups.items())
+
+
+# green / yellow / red for a scan: red if it failed or got cut short, otherwise by the speed
+def record_color(record):
+    rating = record.get("speed_rating", "--")
+    if not record.get("complete") or not str(record.get("speed_down", ""))[:1].isdigit():
+        return BAD
+    if rating == "Poor":
+        return BAD
+    if rating == "Fair":
+        return OK
+    return GOOD
+
+
 # --- HISTORY SCREENS (mixed into FlukeApp, see app.py) ---
 
 class HistoryScreens:
 
-    # paged list of past scans, 6 per page
+    # paged list of past scans, as many per page as fit on the screen
     def build_history_ui(self):
         self.history_frame = tk.Frame(self.container, bg=BG)
+        self.history_page_size = HISTORY_PAGE_SIZE
+        self.make_switcher(self.history_frame, self.history_tabs(), "Scans")
 
         #pack the bottom row first so the list gets the leftover space
         nav = tk.Frame(self.history_frame, bg=BG)
-        nav.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=4)
+        nav.pack(side=tk.BOTTOM, fill=tk.X, padx=px(8), pady=px(4))
         self.make_button(nav, "‹ Newer", self.history_newer, size=11).pack(side=tk.LEFT)
         self.make_button(nav, "Older ›", self.history_older, size=11).pack(side=tk.RIGHT)
         self.history_page_lbl = tk.Label(nav, text="", font=("Helvetica", 10), bg=BG, fg=MUTED)
         self.history_page_lbl.pack(expand=True)
 
         self.history_rows = tk.Frame(self.history_frame, bg=BG)
-        self.history_rows.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        self.history_rows.pack(fill=tk.BOTH, expand=True, padx=px(8), pady=px(4))
 
+    # Scans | Speed history along the top of the History tab
+    def history_tabs(self):
+        return [("Scans", self.open_history), ("Speed history", self.open_speed_history)]
+
+    # one card per switch / Wi-Fi network with a graph of every speed test run on it
+    def build_speed_history_ui(self):
+        self.speed_history_frame = tk.Frame(self.container, bg=BG)
+        self.make_switcher(self.speed_history_frame, self.history_tabs(), "Speed history")
+        self.speed_history_canvas, self.speed_history_inner = self.make_scroll_area(self.speed_history_frame)
+
+    def open_speed_history(self):
+        from .graph import draw_history_chart
+        for child in self.speed_history_inner.winfo_children():
+            child.destroy()
+        groups = speed_groups(load_scan_history(), load_scan_history(WIFI_LOG_PATH))
+        if len(groups) == 0:
+            tk.Label(self.speed_history_inner, text="No speed tests yet", font=("Helvetica", 14),
+                     bg=BG, fg=MUTED).pack(pady=px(40))
+        for title, tests in groups:
+            card = self.make_card(self.speed_history_inner, title)
+            down, up = tests[-1]
+            tk.Label(card, text=f"{len(tests)} tests   last: {down:g} down / {up:g} up Mbps", font=("Helvetica", 10),
+                     bg=CARD_BG, fg=MUTED, anchor="w").pack(fill=tk.X, padx=px(10))
+            chart = tk.Canvas(card, height=px(90), bg=CARD_BG, highlightthickness=0)
+            chart.pack(fill=tk.X, padx=px(6), pady=px(6))
+            chart.bind("<Configure>", lambda event, c=chart, t=tests: draw_history_chart(c, event.width, event.height, t))
+        self.show_frame(self.speed_history_frame, "speed_history")
+        self.speed_history_canvas.yview_moveto(0)
+
+    # same cards as the cable results, filled in when a scan is tapped
     def build_detail_ui(self):
         self.detail_frame = tk.Frame(self.container, bg=BG)
         bar = self.make_header(self.detail_frame, "Scan detail", back=self.show_history_frame)
         # send this scan to a phone as a PDF (share.py)
         self.make_button(bar, "QR", lambda: self.open_share(self.detail_record, "detail"),
-                         size=11).pack(side=tk.RIGHT, padx=6)
-
-        # scrollable since a full scan doesn't fit on screen
-        self.detail_canvas, detail_inner = self.make_scroll_area(self.detail_frame)
-        self.detail_lbl = tk.Label(
-            detail_inner, text="", font=("Courier", 12, "bold"),
-            bg=BG, fg=TEXT, justify=tk.LEFT, anchor="nw"
-        )
-        self.detail_lbl.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+                         size=11).pack(side=tk.RIGHT, padx=px(6))
+        self.detail_canvas, self.detail_inner = self.make_scroll_area(self.detail_frame)
 
     # reload from disk and go to page 1
     def open_history(self):
         self.history_records = load_scan_history()[:MAX_SCAN_RECORDS]
         self.history_page = 0
-        self.render_history_page()
         self.show_history_frame()
+        # how many rows fit depends on the screen (about px(47) each)
+        self.root.update_idletasks()
+        height = self.history_rows.winfo_height()
+        if height > 1:
+            self.history_page_size = max(3, height // px(47))
+        self.render_history_page()
 
     def show_history_frame(self):
         self.show_frame(self.history_frame, "history")
@@ -215,21 +284,54 @@ class HistoryScreens:
             tk.Label(
                 self.history_rows, text="No scans logged yet", font=("Helvetica", 14),
                 bg=BG, fg=MUTED
-            ).pack(pady=40)
-            self.history_page_lbl.config(text="0 / 0")
+            ).pack(pady=px(40))
+            self.history_page_lbl.config(text="")
             return
 
-        pages = (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE
-        start = self.history_page * HISTORY_PAGE_SIZE
-        for record in self.history_records[start:start + HISTORY_PAGE_SIZE]:
-            tk.Button(
-                self.history_rows, text=format_record_summary(record), font=("Courier", 11),
-                anchor="w", bg=CARD_BG, fg=TEXT, activebackground=BAR_BG,
-                activeforeground=TEXT, relief=tk.FLAT, pady=4,
-                command=lambda r=record: self.show_detail_ui(r)
-            ).pack(fill=tk.X, pady=2)
+        size = self.history_page_size
+        pages = (total + size - 1) // size
+        start = self.history_page * size
+        for record in self.history_records[start:start + size]:
+            self.make_history_row(record)
 
-        self.history_page_lbl.config(text=f"Page {self.history_page + 1} / {pages}")
+        self.history_page_lbl.config(text=f"Page {self.history_page + 1} of {pages}")
+
+    # one scan: coloured stripe (green good, yellow so-so, red failed or slow), switch and port,
+    # when, download speed in the same colour
+    def make_history_row(self, record):
+        color = record_color(record)
+        row = tk.Frame(self.history_rows, bg=CARD_BG)
+        row.pack(fill=tk.X, pady=px(2))
+        stripe = tk.Frame(row, bg=color, width=px(6))
+        stripe.pack(side=tk.LEFT, fill=tk.Y)
+
+        down = str(record.get("speed_down", "--")).replace(" Mbps", "")
+        speed = tk.Label(row, text=down, font=("Helvetica", 14, "bold"), bg=CARD_BG, fg=color)
+        unit = tk.Label(row, text="Mbps" if down[:1].isdigit() else "", font=("Helvetica", 9), bg=CARD_BG, fg=MUTED)
+        unit.pack(side=tk.RIGHT, padx=(0, px(10)))
+        speed.pack(side=tk.RIGHT, padx=(px(6), px(3)))
+
+        middle = tk.Frame(row, bg=CARD_BG)
+        middle.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=px(8), pady=px(3))
+        name = str(record.get("switch_name", "--"))
+        port = short_port_name(str(record.get("switch_port", "--")))
+        if port not in ("--", "Not Found"):
+            name = f"{name}  {port}"
+        when = format_stamp(record.get("started_at"), short=True)
+        if not record.get("complete"):
+            when += "   cut short"
+        top = tk.Label(middle, text=name, font=("Helvetica", 12, "bold"), bg=CARD_BG, fg=TEXT, anchor="w")
+        bottom = tk.Label(middle, text=when, font=("Helvetica", 10), bg=CARD_BG, fg=MUTED, anchor="w")
+        top.pack(fill=tk.X)
+        bottom.pack(fill=tk.X)
+
+        # tap anywhere on the row for the details (not when it was a drag)
+        for widget in (row, stripe, speed, unit, middle, top, bottom):
+            widget.bind("<ButtonRelease-1>", lambda event, r=record: self.open_detail(r))
+
+    def open_detail(self, record):
+        if not self.drag_moved:
+            self.show_detail_ui(record)
 
     def history_newer(self):
         if self.history_page > 0:
@@ -237,12 +339,28 @@ class HistoryScreens:
             self.render_history_page()
 
     def history_older(self):
-        if (self.history_page + 1) * HISTORY_PAGE_SIZE < len(self.history_records):
+        if (self.history_page + 1) * self.history_page_size < len(self.history_records):
             self.history_page = self.history_page + 1
             self.render_history_page()
 
     def show_detail_ui(self, record):
         self.detail_record = record
-        self.detail_lbl.config(text=format_record_detail(record))
+        for child in self.detail_inner.winfo_children():
+            child.destroy()
+
+        scan = self.make_card(self.detail_inner, "Scan")
+        self.make_row(scan, "Started", format_stamp(record.get("started_at")))
+        self.make_row(scan, "Finished", format_stamp(record.get("finished_at")))
+        self.make_row(scan, "Complete", "Yes" if record.get("complete") else "No (cable pulled)")
+        self.make_row(scan, "Clock synced", record.get("clock_synced", "unknown"))
+
+        for title, rows in DETAIL_GROUPS:
+            card = self.make_card(self.detail_inner, title)
+            for label, key in rows:
+                self.make_row(card, label, str(record.get(key, "--")))
+            if title == "DNS":
+                self.make_row(card, "Lookups", f"{record.get('dns_queries', 0)}  (last: {record.get('dns_last_domain', '--')})")
+            tk.Frame(card, bg=CARD_BG, height=px(6)).pack()
+
         self.show_frame(self.detail_frame, "detail")
         self.detail_canvas.yview_moveto(0)
