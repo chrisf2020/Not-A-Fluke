@@ -216,13 +216,34 @@ class HistoryScreens:
         #pack the bottom row first so the list gets the leftover space
         nav = tk.Frame(self.history_frame, bg=BG)
         nav.pack(side=tk.BOTTOM, fill=tk.X, padx=px(8), pady=px(4))
-        self.make_button(nav, "‹ Newer", self.history_newer, size=11).pack(side=tk.LEFT)
-        self.make_button(nav, "Older ›", self.history_older, size=11).pack(side=tk.RIGHT)
+        self.make_repeater(nav, "‹ Newer", self.history_newer).pack(side=tk.LEFT)
+        self.make_repeater(nav, "Older ›", self.history_older).pack(side=tk.RIGHT)
         self.history_page_lbl = tk.Label(nav, text="", font=("Helvetica", 10), bg=BG, fg=MUTED)
         self.history_page_lbl.pack(expand=True)
 
         self.history_rows = tk.Frame(self.history_frame, bg=BG)
         self.history_rows.pack(fill=tk.BOTH, expand=True, padx=px(8), pady=px(4))
+
+    # tap for one page, hold to keep flipping pages fast
+    def make_repeater(self, parent, text, step):
+        button = self.make_button(parent, text, step, size=11)
+
+        def repeat():
+            self.repeats += 1
+            step()
+            self.repeat_job = self.root.after(120, repeat)
+
+        def press(event):
+            self.repeats = 0
+            self.repeat_job = self.root.after(400, repeat)
+
+        def release(event):
+            self.root.after_cancel(self.repeat_job)
+            if self.repeats == 0 and not self.drag_moved:
+                step()
+        button.bind("<ButtonPress-1>", press)
+        button.bind("<ButtonRelease-1>", release)
+        return button
 
     # Scans | Speed history along the top of the History tab
     def history_tabs(self):
@@ -267,12 +288,16 @@ class HistoryScreens:
         self.history_records = load_scan_history()[:MAX_SCAN_RECORDS]
         self.history_page = 0
         self.show_history_frame()
-        # how many rows fit depends on the screen (about px(53) each)
-        self.root.update_idletasks()
-        height = self.history_rows.winfo_height()
-        if height > 1:
-            self.history_page_size = max(3, height // px(53))
         self.render_history_page()
+        # how many rows fit: measure a real row, then draw the page again with that many
+        self.root.update_idletasks()
+        rows = self.history_rows.winfo_children()
+        height = self.history_rows.winfo_height()
+        if height > 1 and len(rows) > 0:
+            fits = max(1, height // (rows[0].winfo_reqheight() + 2 * px(2)))
+            if fits != self.history_page_size:
+                self.history_page_size = fits
+                self.render_history_page()
 
     def show_history_frame(self):
         self.show_frame(self.history_frame, "history")
@@ -302,7 +327,7 @@ class HistoryScreens:
     # when, download speed in the same colour
     def make_history_row(self, record):
         color = record_color(record)
-        row = self.rounded_box(self.history_rows, pady=px(2), radius=px(22))
+        row = self.rounded_box(self.history_rows, pady=px(2), radius=px(14))
         stripe = tk.Frame(row, bg=color, width=px(6))
         stripe.pack(side=tk.LEFT, fill=tk.Y)
 
